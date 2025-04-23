@@ -1,0 +1,56 @@
+import os
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, InlineQueryHandler, CallbackQueryHandler, ConversationHandler
+from handlers import (
+    start, index, handle_forwarded_message, set_thumbnail, handle_thumbnail,
+    set_prefix, handle_prefix, set_caption, handle_caption,
+    view_thumbnail, view_prefix, view_caption
+)
+from inline import inline_query, button_callback
+from database import init_db
+
+# Telegram Bot Token (loaded from environment variable for Heroku)
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+
+# Conversation states
+SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
+
+def main():
+    # Initialize database
+    init_db()
+    
+    # Set up bot
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    # Conversation handler for settings
+    conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("setthumbnail", set_thumbnail),
+            CommandHandler("setprefix", set_prefix),
+            CommandHandler("setcaption", set_caption)
+        ],
+        states={
+            SET_THUMBNAIL: [MessageHandler(Filters.photo | Filters.text, handle_thumbnail)],
+            SET_PREFIX: [MessageHandler(Filters.text & ~Filters.command, handle_prefix)],
+            SET_CAPTION: [MessageHandler(Filters.text & ~Filters.command, handle_caption)]
+        },
+        fallbacks=[]
+    )
+
+    # Register handlers
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("index", index))
+    dp.add_handler(MessageHandler(Filters.forwarded, handle_forwarded_message))
+    dp.add_handler(conv_handler)
+    dp.add_handler(CommandHandler("viewthumbnail", view_thumbnail))
+    dp.add_handler(CommandHandler("viewprefix", view_prefix))
+    dp.add_handler(CommandHandler("viewcaption", view_caption))
+    dp.add_handler(InlineQueryHandler(inline_query))
+    dp.add_handler(CallbackQueryHandler(button_callback))
+
+    # Start bot
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
