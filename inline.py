@@ -1,17 +1,7 @@
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultDocument
-from pymongo import MongoClient
-from dotenv import load_dotenv
-import os
-
-# Load environment variables
-load_dotenv()
-
-# MongoDB connection
-MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
-db = client["movie_bot"]
-movies_collection = db["movies"]
+from database import search_movies
+from bson.objectid import ObjectId
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,38 +17,34 @@ async def inline_query(update, context):
     logger.info(f"Inline query received: {query}")
 
     try:
-        # Search movies by title (case-insensitive)
-        search_terms = query.lower().split()
-        regex_patterns = [f".*{term}.*" for term in search_terms]
-        movies = movies_collection.find({
-            "$or": [
-                {"title": {"$regex": pattern, "$options": "i"}}
-                for pattern in regex_patterns
-            ]
-        }).limit(50)
+        # Split query into terms for flexible matching
+        search_terms = query.split()
+        year = None
+        try:
+            # Extract year if present (e.g., "1921" in "The Kid 1921")
+            for term in search_terms:
+                if term.isdigit() and len(term) == 4:
+                    year = int(term)
+                    search_terms.remove(term)
+                    break
+        except ValueError:
+            pass
+
+        movie_name = " ".join(search_terms)
+        movies = search_movies(movie_name, year=year)
 
         results = []
-        for movie in movies:
-            title = movie.get("title", "Unknown")
-            year = movie.get("year", 0)
-            quality = movie.get("quality", "Unknown")
-            file_id = movie.get("file_id")
-            file_size = movie.get("file_size", "Unknown")
-
-            if not file_id:
-                logger.warning(f"Movie {title} has no file_id")
-                continue
-
-            # Create inline result
+        for title, movie_year, quality, file_size, file_id, message_id in movies:
+            result_id = f"{file_id}_{message_id}"
             results.append(
                 InlineQueryResultDocument(
-                    id=str(movie["_id"]),
-                    title=f"{title} ({year})",
+                    id=result_id,
+                    title=f"{title} ({movie_year})",
                     document_file_id=file_id,
-                    caption=f"{title} ({year}, {quality}, {file_size})",
+                    caption=f"{title} ({movie_year}, {quality}, {file_size})",
                     description=f"Quality: {quality}, Size: {file_size}",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("Download", callback_data=f"download_{movie['_id']}")
+                        InlineKeyboardButton("Download", callback_data=f"download_{result_id}")
                     ]])
                 )
             )
@@ -74,9 +60,10 @@ async def button_callback(update, context):
     query = update.callback_query
     data = query.data
     if data.startswith("download_"):
-        movie_id = data.split("_")[1]
-        movie = movies_collection.find_one({"_id": movie_id})
-        if movie and movie.get("file_id"):
+        result_id = data.split("_", 1)[1]
+        file_id = result_id.split("_")[0]
+        movie = movies_collection.find_one({"file_id": file_id})
+        if movie:
             await query.message.reply_document(
                 document=movie["file_id"],
                 caption=f"{movie['title']} ({movie['year']}, {movie['quality']})"
@@ -84,5 +71,5 @@ async def button_callback(update, context):
             logger.info(f"User downloaded movie: {movie['title']} ({movie['_id']})")
         else:
             await query.message.reply_text("Movie file not found.")
-            logger.warning(f"Movie not found for download: {movie_id}")
+            logger.warning(f"Movie not found for download: {result_id}")
         await query.answer()
