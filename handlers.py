@@ -109,21 +109,18 @@ async def handle_forwarded_message(update, context):
                     file_id = message.document.file_id
                     message_id = message.message_id
 
-                    # Check for duplicate by file_id
-                    if movies_collection.find_one({"file_id": file_id}):
-                        logger.info(f"Skipped duplicate movie: {file_name} in channel {forwarded_channel_id}")
-                        skipped_count += 1
-                        continue
-
                     try:
                         parts = file_name.replace('.mkv', '').split('_')
                         title = parts[0].replace('.', ' ')
                         year = int(parts[1]) if len(parts) > 1 else 0
                         quality = parts[2] if len(parts) > 2 else 'Unknown'
                         file_size = f"{message.document.file_size / (1024 * 1024):.2f}MB"
-                        add_movie(title, year, quality, file_size, file_id, message_id)
-                        logger.info(f"Indexed movie: {title} ({year}, {quality}) from channel {forwarded_channel_id}")
-                        indexed_count += 1
+                        if add_movie(title, year, quality, file_size, file_id, message_id):
+                            logger.info(f"Indexed movie: {title} ({year}, {quality}) from channel {forwarded_channel_id}")
+                            indexed_count += 1
+                        else:
+                            logger.info(f"Skipped duplicate movie: {file_name} in channel {forwarded_channel_id}")
+                            skipped_count += 1
                     except (IndexError, ValueError) as e:
                         logger.warning(f"Skipped invalid file name: {file_name} in channel {forwarded_channel_id} - {str(e)}")
                         skipped_count += 1
