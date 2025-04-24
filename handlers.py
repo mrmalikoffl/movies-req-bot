@@ -31,7 +31,7 @@ async def start(update, context):
     add_user(chat_id)
     await update.message.reply_text(
         "Welcome to the Movie Bot! 🎥\n"
-        "Just type a movie name (e.g., 'The Kid 1921' or 'The Kid tamil') to search for movies.\n"
+        "Just type a movie name (e.g., 'Mitra 2025' or 'Mitra tamil') to search for movies.\n"
         "Customize your downloads:\n"
         "  /setthumbnail - Set a custom thumbnail\n"
         "  /setprefix - Set a filename prefix\n"
@@ -108,7 +108,6 @@ async def handle_forwarded_message(update, context):
             api_hash = os.getenv("TELEGRAM_API_HASH")
             bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
 
-            # Debug logging for environment variables
             logger.info(f"TELEGRAM_API_ID: {api_id}")
             logger.info(f"TELEGRAM_API_HASH: {api_hash}")
             logger.info(f"TELEGRAM_BOT_TOKEN: {bot_token[:10]}...")
@@ -232,7 +231,7 @@ async def search_movie(update, context):
     logger.info(f"User {chat_id} searched for: '{query}'")
 
     if not query:
-        await update.message.reply_text("Please type a movie name to search (e.g., 'The Kid 1921').")
+        await update.message.reply_text("Please type a movie name to search (e.g., 'Mitra 2025').")
         logger.info(f"User {chat_id} sent empty search query")
         return
 
@@ -270,15 +269,34 @@ async def search_movie(update, context):
             logger.info(f"No movies found for query: name={movie_name}, year={year}, language={language}")
             return
 
+        # Prepare the response
+        total_results = len(movies)
+        page = 1
+        total_pages = 1  # Simplified pagination (all results in one message for now)
+
+        header = (
+            f"Search Query: {query}  TOTAL RESULTS: {total_results}  PAGE: {page}/{total_pages}\n\n"
+            "🔻 Tap on the file button and then start to download. 🔻\n\n"
+        )
+
+        # Format results
+        results = []
         for movie_id, title, movie_year, quality, file_size, file_id, message_id in movies:
-            caption = f"{title} ({movie_year}, {quality}, {file_size})"
-            await update.message.reply_text(
-                caption,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("Download", callback_data=f"download_{movie_id}")
-                ]])
-            )
-        logger.info(f"Found {len(movies)} movies for query: name={movie_name}, year={year}, language={language}")
+            language_str = language if language else ''
+            result_line = f"[{file_size}] {title} {movie_year} {language_str} {quality}".strip()
+            results.append((result_line, movie_id))
+
+        # Send results as a single message with buttons
+        message_text = header + "\n".join([line for line, _ in results])
+        buttons = [
+            [InlineKeyboardButton(line, callback_data=f"download_{movie_id}")] 
+            for line, movie_id in results
+        ]
+        await update.message.reply_text(
+            message_text,
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        logger.info(f"Found {total_results} movies for query: name={movie_name}, year={year}, language={language}")
 
     except TelegramError as te:
         await update.message.reply_text("Error occurred. Please try again later.")
@@ -308,13 +326,15 @@ async def button_callback(update, context):
             return
 
         thumbnail_file_id, prefix, caption = get_user_settings(user_id)
-        final_caption = caption or f"{movie['title']} ({movie['year']}, {movie['quality']})"
+        language_str = f" {movie['language']}" if movie.get('language') else ''
+        default_caption = f"{movie['title']} ({movie['year']}) {language_str} {movie['quality']}"
+        final_caption = caption or default_caption
 
         await query.message.reply_document(
             document=movie["file_id"],
-            caption=final_caption,
+            caption=f"{final_caption}  {movie['file_size']} MKV",
             thumb=thumbnail_file_id,
-            parse_mode='Markdown'
+            parse_mode=None
         )
         logger.info(f"User {user_id} downloaded movie: {movie['title']} ({movie['_id']})")
 
