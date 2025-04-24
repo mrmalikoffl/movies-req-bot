@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
 
 async def fix_thumb(thumb):
-    """Process and resize thumbnail image"""
+    """Process and resize thumbnail image to Baseline JPEG"""
     width = 0
     height = 0
     try:
@@ -60,10 +60,11 @@ async def fix_thumb(thumb):
                     img = img.convert("RGB")
                     # Resize while maintaining aspect ratio
                     new_width = 320
-                    aspect_ratio = height / width
+                    aspect_ratio = height / width if width > 0 else 1
                     new_height = int(new_width * aspect_ratio)
                     img = img.resize((new_width, new_height))
-                    img.save(thumb, "JPEG")
+                    # Save as Baseline JPEG explicitly to avoid Progressive JPEG warning
+                    img.save(thumb, "JPEG", quality=95, optimize=True, progressive=False)
                 return width, height, thumb
     except Exception as e:
         logger.error(f"Error in fix_thumb: {str(e)}")
@@ -117,12 +118,13 @@ async def handle_forwarded_message(update, context):
     message = update.message
     chat_id = update.message.chat_id
 
-    if not message.forward_from_chat:
+    # Check forward_origin instead of forward_from_chat (Fix for 'Message' object has no attribute 'forward_from_chat')
+    if not hasattr(message, 'forward_origin') or not message.forward_origin or message.forward_origin.type != 'channel':
         await update.message.reply_text("Please forward a message from a channel.")
         logger.warning(f"User {chat_id} forwarded a non-channel message")
         return
 
-    forwarded_channel_id = str(message.forward_from_chat.id)
+    forwarded_channel_id = str(message.forward_origin.chat.id)
     logger.info(f"User {chat_id} forwarded message from channel {forwarded_channel_id}")
 
     if not forwarded_channel_id.startswith('-100'):
@@ -365,7 +367,7 @@ async def search_movie(update, context):
             movies = search_movies(movie_name, language=language)
             logger.info(f"No results for '{query}' with year={year}, falling back to no year")
 
-        if not movies:
+        if not movies0:
             await update.message.reply_text("No movies found. Try another search.")
             logger.info(f"No movies found for query: name={movie_name}, year={year}, language={language}")
             return
@@ -464,17 +466,21 @@ async def button_callback(update, context):
                 document=movie['file_id'],
                 filename=final_filename,
                 caption=f"{final_caption}  {movie['file_size']} MKV",
-                thumb=open(processed_thumbnail, "rb") if processed_thumbnail else None,
+                thumbnail=open(processed_thumbnail, "rb") if processed_thumbnail else None,  # Changed from thumb to thumbnail
                 parse_mode=None
             )
             logger.info(f"User {user_id} downloaded movie: {movie['title']}")
 
             # If thumbnail couldn't be applied, send it separately
-            if processed_thumbnail and not sent_message.document.thumb:
+            if processed_thumbnail and not sent_message.document.thumbnail:  # Changed from thumb to thumbnail
                 await query.message.reply_photo(
                     photo=thumbnail_file_id,
                     caption="Your custom thumbnail (couldn't be applied to the file)"
                 )
+        except telegram.error.BadRequest as e:
+            logger.error(f"BadRequest in send_document for user {user_id}: {str(e)}")
+            await query.message.reply_text("Error: The file may be too large or invalid.")
+            raise
         except Exception as e:
             logger.error(f"Error sending movie to user {user_id}: {str(e)}")
             await query.message.reply_text("Error sending file. Please try again.")
@@ -498,7 +504,7 @@ async def button_callback(update, context):
 async def set_thumbnail(update, context):
     """Initiate thumbnail setting process"""
     await update.message.reply_text(
-        "Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:",
+        "Please upload a JPEG or PNG image for your custom thumbnail or type 'default' for a default thumbnail:",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton('Cancel', callback_data='cancel_thumbnail')]]
         )
@@ -507,7 +513,7 @@ async def set_thumbnail(update, context):
     return SET_THUMBNAIL
 
 async def handle_thumbnail(update, context):
-    """Process thumbnail setting"""
+    """Process thumbnail setting with format validation"""
     chat_id = update.message.chat_id
     
     if update.callback_query and update.callback_query.data == 'cancel_thumbnail':
@@ -523,13 +529,24 @@ async def handle_thumbnail(update, context):
         
     elif update.message.photo:
         thumbnail_file_id = update.message.photo[-1].file_id
-        update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
-        await update.message.reply_text("✅ Custom thumbnail set successfully!")
-        logger.info(f"User {chat_id} set thumbnail: {thumbnail_file_id}")
-        return ConversationHandler.END
+        # Validate file type
+        try:
+            file = await context.bot.get_file(thumbnail_file_id)
+            if not file.file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+                await update.message.reply_text("Please upload a JPEG or PNG image.")
+                logger.warning(f"Invalid thumbnail format from user {chat_id}")
+                return SET_THUMBNAIL
+            update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
+            await update.message.reply_text("✅ Custom thumbnail set successfully!")
+            logger.info(f"User {chat_id} set thumbnail: {thumbnail_file_id}")
+            return ConversationHandler.END
+        except Exception as e:
+            logger.error(f"Error validating thumbnail for user {chat_id}: {str(e)}")
+            await update.message.reply_text("Error processing thumbnail. Please try again.")
+            return SET_THUMBNAIL
         
     else:
-        await update.message.reply_text("Invalid input. Please upload an image or type 'default'.")
+        await update.message.reply_text("Invalid input. Please upload a JPEG or PNG image or type 'default'.")
         logger.warning(f"Invalid thumbnail input from user {chat_id}")
         return SET_THUMBNAIL
 
