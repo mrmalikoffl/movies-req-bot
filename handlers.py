@@ -38,14 +38,14 @@ def start(update, context):
         "  /viewthumbnail - See your thumbnail\n"
         "  /viewprefix - See your prefix\n"
         "  /viewcaption - See your caption\n"
-        "- Admin: Use /index to index movies from any channel where I'm an admin.\n"
+        "- Admin: Use /index and forward an MKV file message from a channel where I'm an admin.\n"
         "All movies are legal, public domain content."
     )
     logger.info(f"User {chat_id} started the bot")
 
 def index(update, context):
     chat_id = update.message.chat_id
-    update.message.reply_text("Please forward a message from a channel where I am an admin to start indexing.")
+    update.message.reply_text("Please forward an MKV file message from a channel where I am an admin to index it.")
     context.user_data['indexing'] = True
     context.user_data['index_channel_id'] = None
     logger.info(f"User {chat_id} initiated indexing")
@@ -90,37 +90,27 @@ def handle_forwarded_message(update, context):
         context.user_data['index_channel_id'] = forwarded_channel_id
         logger.info(f"User {chat_id} set indexing channel to {forwarded_channel_id}")
 
-        # Index messages from the channel
-        try:
-            messages = []
-            offset = 0
-            while True:
-                batch = context.bot.get_chat_history(forwarded_channel_id, limit=100, offset=offset)
-                if not batch:
-                    break
-                messages.extend(batch)
-                offset += 100
-            for message in messages:
-                if message.document and message.document.file_name.endswith('.mkv'):
-                    file_name = message.document.file_name
-                    file_id = message.document.file_id
-                    message_id = message.message_id
-                    try:
-                        parts = file_name.replace('.mkv', '').split('_')
-                        title = parts[0].replace('.', ' ')
-                        year = int(parts[1]) if len(parts) > 1 else 0
-                        quality = parts[2] if len(parts) > 2 else 'Unknown'
-                        file_size = f"{message.document.file_size / (1024 * 1024):.2f}MB"
-                        add_movie(title, year, quality, file_size, file_id, message_id)
-                        logger.info(f"Indexed movie: {title} ({year}, {quality}) from channel {forwarded_channel_id}")
-                    except (IndexError, ValueError) as e:
-                        logger.warning(f"Skipped invalid file name: {file_name} in channel {forwarded_channel_id} - {str(e)}")
-                        continue
-            update.message.reply_text(f"Indexing complete for channel {forwarded_channel_id}. ✅")
-            logger.info(f"Indexing completed for channel {forwarded_channel_id}")
-        except TelegramError as e:
-            update.message.reply_text(f"Error indexing channel: {str(e)}")
-            logger.error(f"Error indexing channel {forwarded_channel_id}: {str(e)}")
+        # Index the forwarded message if it contains an MKV file
+        if message.document and message.document.file_name.endswith('.mkv'):
+            file_name = message.document.file_name
+            file_id = message.document.file_id
+            message_id = message.message_id
+            try:
+                parts = file_name.replace('.mkv', '').split('_')
+                title = parts[0].replace('.', ' ')
+                year = int(parts[1]) if len(parts) > 1 else 0
+                quality = parts[2] if len(parts) > 2 else 'Unknown'
+                file_size = f"{message.document.file_size / (1024 * 1024):.2f}MB"
+                add_movie(title, year, quality, file_size, file_id, message_id)
+                update.message.reply_text(f"✅ Movie indexed: {title} ({year}, {quality})")
+                logger.info(f"Indexed movie: {title} ({year}, {quality}) from channel {forwarded_channel_id}")
+            except (IndexError, ValueError) as e:
+                update.message.reply_text(f"Failed to index movie: Invalid file name format ({file_name}).")
+                logger.warning(f"Skipped invalid file name: {file_name} in channel {forwarded_channel_id} - {str(e)}")
+        else:
+            update.message.reply_text("Please forward a message containing an MKV file.")
+            logger.warning(f"Forwarded message from {forwarded_channel_id} by user {chat_id} does not contain an MKV file")
+
     except TelegramError as e:
         update.message.reply_text(f"Error accessing channel: {str(e)}")
         logger.error(f"Error accessing channel {forwarded_channel_id} for user {chat_id}: {str(e)}")
