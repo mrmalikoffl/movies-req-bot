@@ -1,6 +1,10 @@
 import os
+import time
 import logging
 import asyncio
+from PIL import Image
+from hachoir.metadata import extractMetadata
+from hachoir.parser import createParser
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError, BadRequest
 from telegram.ext import ConversationHandler
@@ -37,6 +41,30 @@ logger = logging.getLogger(__name__)
 
 # Conversation states
 SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
+
+async def fix_thumb(thumb):
+    width = 0
+    height = 0
+    try:
+        if thumb is not None:
+            metadata = extractMetadata(createParser(thumb))
+            if metadata is not None:
+                if metadata.has("width"):
+                    width = metadata.get("width")
+                if metadata.has("height"):
+                    height = metadata.get("height")
+                Image.open(thumb).convert("RGB").save(thumb)
+                img = Image.open(thumb)
+                # Resize while maintaining aspect ratio
+                new_width = 320
+                aspect_ratio = height / width
+                new_height = int(new_width * aspect_ratio)
+                img.resize((new_width, new_height))
+                img.save(thumb, "JPEG")
+    except Exception as e:
+        logger.error(f"Error in fix_thumb: {str(e)}")
+        thumb = None
+    return width, height, thumb
 
 async def start(update, context):
     chat_id = update.message.chat_id
@@ -231,7 +259,8 @@ async def handle_forwarded_message(update, context):
                             file_size=file_size,
                             file_id=file_id,
                             message_id=message_id,
-                            language=language
+                            language=language,
+                            channel_id=forwarded_channel_id  # Store channel_id
                         )
                         
                         if movie_id:
@@ -349,7 +378,7 @@ async def search_movie(update, context):
         # Format results
         results = []
         for movie_data in movies:
-            movie_id, title, movie_year, quality, file_size, file_id, message_id = movie_data[:7]
+            movie_id, title, movie_year, quality, file_size, file_id, message_id, channel_id = movie_data
             # Fetch the movie document to get the language
             movie_doc = movies_collection.find_one({"_id": ObjectId(movie_id)})
             movie_language = movie_doc.get('language', '') if movie_doc else ''
@@ -414,43 +443,60 @@ async def button_callback(update, context):
         final_filename = f"{prefix}{default_filename}" if prefix else default_filename
         logger.info(f"User {user_id} - Using filename: {final_filename}")
 
-        # Log thumbnail usage
+        # Process the thumbnail if set
+        processed_thumbnail = None
         if thumbnail_file_id:
-            logger.info(f"User {user_id} - Using custom thumbnail: {thumbnail_file_id}")
-        else:
-            logger.info(f"User {user_id} - No custom thumbnail set, using Telegram default")
+            try:
+                # Download the thumbnail
+                thumbnail_file = await context.bot.get_file(thumbnail_file_id)
+                thumbnail_path = f"/tmp/thumb_{user_id}_{time.time()}.jpg"
+                await thumbnail_file.download_to_drive(thumbnail_path)
 
-        # Download and re-upload the file to apply the custom thumbnail
-        try:
-            # Get the file path from Telegram
-            file = await context.bot.get_file(movie["file_id"])
-            file_path = file.file_path
+                # Process the thumbnail
+                width, height, processed_thumbnail = await fix_thumb(thumbnail_path)
+                if processed_thumbnail is None:
+                    logger.warning(f"User {user_id} - Thumbnail processing failed, using default thumbnail")
+                else:
+                    logger.info(f"User {user_id} - Thumbnail processed successfully: {processed_thumbnail}")
+            except Exception as e:
+                logger.error(f"User {user_id} - Error processing thumbnail: {str(e)}")
+                processed_thumbnail = None
 
-            # Download the file
-            downloaded_file = await file.download_as_bytearray()
+        # Copy the movie file to the bot's chat to avoid re-uploading
+        bot_chat_id = context.bot.id
+        copied_message = await context.bot.copy_message(
+            chat_id=bot_chat_id,
+            from_chat_id=movie.get("channel_id", "-1002559398614"),
+            message_id=movie["message_id"]
+        )
 
-            # Re-upload the file with the custom thumbnail
-            new_file = await context.bot.send_document(
-                chat_id=user_id,
-                document=downloaded_file,
-                filename=final_filename,
-                caption=f"{final_caption}  {movie['file_size']} MKV",
-                thumb=thumbnail_file_id if thumbnail_file_id else None,
-                parse_mode=None
+        # Send the file to the user with the custom thumbnail, filename, and caption
+        sent_message = await context.bot.send_document(
+            chat_id=user_id,
+            document=copied_message.document.file_id,
+            filename=final_filename,
+            caption=f"{final_caption}  {movie['file_size']} MKV",
+            thumb=open(processed_thumbnail, "rb") if processed_thumbnail else None,
+            parse_mode=None
+        )
+
+        logger.info(f"User {user_id} downloaded movie: {movie['title']} ({movie['_id']}) with filename: {final_filename}")
+
+        # If the thumbnail couldn't be applied, send it separately
+        if processed_thumbnail and sent_message.document.thumb is None:
+            await query.message.reply_photo(
+                photo=thumbnail_file_id,
+                caption=(
+                    "🖼️ This is your custom thumbnail.\n"
+                    "Due to Telegram limitations, the thumbnail couldn’t be applied to the movie file. "
+                    "Please set this thumbnail when uploading the movie to a channel."
+                )
             )
-            logger.info(f"User {user_id} re-uploaded movie: {movie['title']} ({movie['_id']}) with new file_id: {new_file.document.file_id}")
+            logger.info(f"User {user_id} - Sent custom thumbnail separately: {thumbnail_file_id}")
 
-        except TelegramError as te:
-            logger.warning(f"Failed to re-upload file for user {user_id}: {str(te)}. Falling back to original file_id.")
-            # Fallback: Send the original file if re-upload fails
-            await query.message.reply_document(
-                document=movie["file_id"],
-                filename=final_filename,
-                caption=f"{final_caption}  {movie['file_size']} MKV",
-                thumb=thumbnail_file_id if thumbnail_file_id else None,
-                parse_mode=None
-            )
-            logger.info(f"User {user_id} downloaded movie (fallback): {movie['title']} ({movie['_id']}) with filename: {final_filename}")
+        # Clean up
+        if processed_thumbnail and os.path.exists(processed_thumbnail):
+            os.remove(processed_thumbnail)
 
         await query.answer(text="Download started!")
 
