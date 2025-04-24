@@ -3,7 +3,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.ext import ConversationHandler
-from database import add_user, update_user_settings, get_user_settings, add_movie
+from database import add_user, update_user_settings, get_user_settings, add_movie, search_movies
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from telethon import TelegramClient
@@ -31,16 +31,16 @@ async def start(update, context):
     add_user(chat_id)
     await update.message.reply_text(
         "Welcome to the Movie Bot! 🎥\n"
-        "- Type a movie name (e.g., '@YourBotName The Kid 1921') to search.\n"
-        "- Customize your downloads:\n"
+        "Just type a movie name (e.g., 'The Kid 1921' or 'The Kid tamil') to search for movies.\n"
+        "Customize your downloads:\n"
         "  /setthumbnail - Set a custom thumbnail\n"
         "  /setprefix - Set a filename prefix\n"
         "  /setcaption - Set a custom caption\n"
-        "- View settings:\n"
+        "View settings:\n"
         "  /viewthumbnail - See your thumbnail\n"
         "  /viewprefix - See your prefix\n"
         "  /viewcaption - See your caption\n"
-        "- Admin: Use /index and forward a message from a channel where I'm an admin to index all MKV files.\n"
+        "Admin: Use /index and forward a message from a channel where I'm an admin to index all MKV files.\n"
         "All movies are legal, public domain content."
     )
     logger.info(f"User {chat_id} started the bot")
@@ -223,6 +223,107 @@ async def handle_forwarded_message(update, context):
     finally:
         context.user_data['indexing'] = False
         context.user_data['index_channel_id'] = None
+
+async def search_movie(update, context):
+    """Handle text-based movie search in personal messages."""
+    chat_id = update.message.chat_id
+    query = update.message.text.strip()
+    logger.info(f"User {chat_id} searched for: '{query}'")
+
+    if not query:
+        await update.message.reply_text("Please type a movie name to search (e.g., 'The Kid 1921').")
+        logger.info(f"User {chat_id} sent empty search query")
+        return
+
+    try:
+        # Split query into terms for flexible matching
+        search_terms = query.split()
+        year = None
+        language = None
+        try:
+            for term in search_terms:
+                if term.isdigit() and len(term) == 4:
+                    year = int(term)
+                    search_terms.remove(term)
+                    break
+        except ValueError:
+            pass
+
+        # Check for language keywords
+        language_terms = ['tamil', 'english', 'hindi']
+        for term in search_terms[:]:
+            if term.lower() in language_terms:
+                language = term.lower()
+                search_terms.remove(term)
+
+        movie_name = " ".join(search_terms)
+        movies = search_movies(movie_name, year=year, language=language)
+
+        if not movies:
+            await update.message.reply_text("No movies found. Try another search.")
+            logger.info(f"No movies found for query: '{query}' by user {chat_id}")
+            return
+
+        for title, movie_year, quality, file_size, file_id, message_id in movies:
+            result_id = f"{file_id}_{message_id}_{movie_year}"
+            caption = f"{title} ({movie_year}, {quality}, {file_size})"
+            await update.message.reply_text(
+                caption,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Download", callback_data=f"download_{result_id}")
+                ]])
+            )
+        logger.info(f"Found {len(movies)} movies for query: '{query}' by user {chat_id}")
+
+    except TelegramError as te:
+        await update.message.reply_text("Error occurred. Please try again later.")
+        logger.error(f"Telegram error in search '{query}' by user {chat_id}: {str(te)}")
+    except Exception as e:
+        await update.message.reply_text("Error occurred. Please try again later.")
+        logger.error(f"Error in search '{query}' by user {chat_id}: {str(e)}")
+
+async def button_callback(update, context):
+    """Handle download button clicks."""
+    query = update.callback_query
+    data = query.data
+    user_id = query.from_user.id
+
+    if not data.startswith("download_"):
+        await query.answer()
+        return
+
+    try:
+        result_id = data.split("_", 1)[1]
+        file_id, message_id, movie_year = result_id.split("_")
+        movie = movies_collection.find_one({"file_id": file_id, "message_id": int(message_id)})
+
+        if not movie:
+            await query.message.reply_text("Movie not found. It may have been deleted.")
+            logger.warning(f"Movie not found for download: {result_id} by user {user_id}")
+            await query.answer()
+            return
+
+        thumbnail_file_id, prefix, caption = get_user_settings(user_id)
+        final_caption = caption or f"{movie['title']} ({movie['year']}, {movie['quality']})"
+
+        await query.message.reply_document(
+            document=movie["file_id"],
+            caption=final_caption,
+            thumb=thumbnail_file_id,
+            parse_mode='Markdown'
+        )
+        logger.info(f"User {user_id} downloaded movie: {movie['title']} ({movie['_id']})")
+
+        await query.answer(text="Download started!")
+
+    except TelegramError as te:
+        await update.message.reply_text("Error sending movie. Please try again later.")
+        logger.error(f"Telegram error in download for {result_id} by user {user_id}: {str(te)}")
+        await query.answer(text="Download error.")
+    except Exception as e:
+        await update.message.reply_text("An error occurred. Please try again later.")
+        logger.error(f"Error in download for {result_id} by user {user_id}: {str(e)}")
+        await query.answer(text="Download error.")
 
 async def set_thumbnail(update, context):
     await update.message.reply_text("Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:")
