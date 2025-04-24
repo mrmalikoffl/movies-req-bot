@@ -218,7 +218,7 @@ async def handle_forwarded_message(update, context):
     finally:
         context.user_data['indexing'] = False
         context.user_data['index_channel_id'] = None
-
+        
 async def set_thumbnail(update, context):
     await update.message.reply_text("Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:")
     logger.info(f"User {update.message.chat_id} initiated /setthumbnail")
