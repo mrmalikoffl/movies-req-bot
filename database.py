@@ -3,6 +3,7 @@ import logging
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from dotenv import load_dotenv
+from bson.objectid import ObjectId
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,7 +24,7 @@ except PyMongoError as e:
 def init_db():
     """Initialize database with necessary indexes."""
     try:
-        movies_collection.create_index([("file_id", 1)], unique=True)
+        movies_collection.create_index([("file_id", 1), ("message_id", 1)], unique=True)
         movies_collection.create_index([("title", "text")])
         movies_collection.create_index([("year", 1), ("language", 1)])
         users_collection.create_index([("chat_id", 1)], unique=True)
@@ -98,7 +99,7 @@ def get_user_settings(chat_id):
         raise
 
 def add_movie(title, year, quality, file_size, file_id, message_id, language=None):
-    """Add a movie to movies_collection if it doesn't exist."""
+    """Add a movie to movies_collection if it doesn't exist, return the _id."""
     try:
         if not isinstance(file_id, str) or not file_id:
             raise ValueError("file_id must be a non-empty string")
@@ -128,36 +129,51 @@ def add_movie(title, year, quality, file_size, file_id, message_id, language=Non
 
         result = movies_collection.insert_one(movie_doc)
         logger.info(f"Added movie: {title} ({year}, {quality}, {language}) with ID {result.inserted_id}")
-        return True
+        return str(result.inserted_id)
     except DuplicateKeyError:
-        logger.info(f"Skipped duplicate movie with file_id {file_id}")
-        return False
+        logger.info(f"Skipped duplicate movie with file_id {file_id} and message_id {message_id}")
+        return None
     except (PyMongoError, ValueError) as e:
         logger.error(f"Error adding movie {title}: {str(e)}")
         raise
 
 def search_movies(movie_name, year=None, language=None):
-    """Search movies in movies_collection by name, year, and/or language."""
+    """Search movies in movies_collection by name, year, and/or language with fallback."""
     try:
+        if not isinstance(movie_name, str) or not movie_name:
+            raise ValueError("movie_name must be a non-empty string")
+        if year and not isinstance(year, int):
+            raise ValueError("year must be an integer")
+        if language and not isinstance(language, str):
+            raise ValueError("language must be a string")
+
+        # Primary query with all filters
         query = {}
         if movie_name:
             terms = movie_name.split()
             query["$text"] = {"$search": " ".join([f"\"{term}\"" for term in terms])}
         if year:
-            if not isinstance(year, int):
-                raise ValueError("year must be an integer")
             query["year"] = year
         if language:
-            if not isinstance(language, str):
-                raise ValueError("language must be a string")
             query["language"] = language.lower()
 
         results = movies_collection.find(query).limit(50)
         movies = [
-            (r["title"], r["year"], r["quality"], r["file_size"], r["file_id"], r["message_id"])
+            (str(r["_id"]), r["title"], r["year"], r["quality"], r["file_size"], r["file_id"], r["message_id"])
             for r in results
         ]
         logger.info(f"Found {len(movies)} movies for query: name={movie_name}, year={year}, language={language}")
+
+        # Fallback: If no results and year is specified, try without year
+        if not movies and year:
+            query.pop("year")
+            results = movies_collection.find(query).limit(50)
+            movies = [
+                (str(r["_id"]), r["title"], r["year"], r["quality"], r["file_size"], r["file_id"], r["message_id"])
+                for r in results
+            ]
+            logger.info(f"Fallback search without year: Found {len(movies)} movies for name={movie_name}, language={language}")
+
         return movies
     except PyMongoError as e:
         logger.error(f"Error searching movies: {str(e)}")
