@@ -420,15 +420,37 @@ async def button_callback(update, context):
         else:
             logger.info(f"User {user_id} - No custom thumbnail set, using Telegram default")
 
-        # Send the document with custom thumbnail, filename, and caption
-        await query.message.reply_document(
-            document=movie["file_id"],
-            filename=final_filename,
-            caption=f"{final_caption}  {movie['file_size']} MKV",
-            thumb=thumbnail_file_id if thumbnail_file_id else None,
-            parse_mode=None
-        )
-        logger.info(f"User {user_id} downloaded movie: {movie['title']} ({movie['_id']}) with filename: {final_filename}")
+        # Download and re-upload the file to apply the custom thumbnail
+        try:
+            # Get the file path from Telegram
+            file = await context.bot.get_file(movie["file_id"])
+            file_path = file.file_path
+
+            # Download the file
+            downloaded_file = await file.download_as_bytearray()
+
+            # Re-upload the file with the custom thumbnail
+            new_file = await context.bot.send_document(
+                chat_id=user_id,
+                document=downloaded_file,
+                filename=final_filename,
+                caption=f"{final_caption}  {movie['file_size']} MKV",
+                thumb=thumbnail_file_id if thumbnail_file_id else None,
+                parse_mode=None
+            )
+            logger.info(f"User {user_id} re-uploaded movie: {movie['title']} ({movie['_id']}) with new file_id: {new_file.document.file_id}")
+
+        except TelegramError as te:
+            logger.warning(f"Failed to re-upload file for user {user_id}: {str(te)}. Falling back to original file_id.")
+            # Fallback: Send the original file if re-upload fails
+            await query.message.reply_document(
+                document=movie["file_id"],
+                filename=final_filename,
+                caption=f"{final_caption}  {movie['file_size']} MKV",
+                thumb=thumbnail_file_id if thumbnail_file_id else None,
+                parse_mode=None
+            )
+            logger.info(f"User {user_id} downloaded movie (fallback): {movie['title']} ({movie['_id']}) with filename: {final_filename}")
 
         await query.answer(text="Download started!")
 
