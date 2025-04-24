@@ -1,73 +1,70 @@
-import sqlite3
 import os
+from pymongo import MongoClient
+from dotenv import load_dotenv
 
-DB_FILE = "movies.db"
+# Load environment variables
+load_dotenv()
+
+# MongoDB connection (loaded from environment variable)
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://moviebotuser:<password>@moviebotcluster.mongodb.net/?retryWrites=true&w=majority")
+client = MongoClient(MONGO_URI)
+db = client["movie_bot"]  # Database name
+movies_collection = db["movies"]  # Collection for movies
+users_collection = db["users"]  # Collection for users
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # Movies table
-    c.execute('''CREATE TABLE IF NOT EXISTS movies
-                 (id INTEGER PRIMARY KEY, title TEXT, year INTEGER, quality TEXT, file_size TEXT,
-                  file_id TEXT, message_id INTEGER, UNIQUE(file_id))''')
-    # Users table for custom settings
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (chat_id INTEGER PRIMARY KEY, thumbnail_file_id TEXT, prefix TEXT, caption TEXT)''')
-    conn.commit()
-    conn.close()
+    # Create indexes for efficient queries
+    movies_collection.create_index([("file_id", 1)], unique=True)
+    users_collection.create_index([("chat_id", 1)], unique=True)
+    # MongoDB collections are created automatically when data is inserted
 
 def add_user(chat_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (chat_id) VALUES (?)", (chat_id,))
-    conn.commit()
-    conn.close()
+    users_collection.update_one(
+        {"chat_id": chat_id},
+        {"$setOnInsert": {"chat_id": chat_id}},
+        upsert=True
+    )
 
 def update_user_settings(chat_id, thumbnail_file_id=None, prefix=None, caption=None):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+    update_fields = {}
     if thumbnail_file_id is not None:
-        c.execute("UPDATE users SET thumbnail_file_id = ? WHERE chat_id = ?", (thumbnail_file_id, chat_id))
+        update_fields["thumbnail_file_id"] = thumbnail_file_id
     if prefix is not None:
-        c.execute("UPDATE users SET prefix = ? WHERE chat_id = ?", (prefix, chat_id))
+        update_fields["prefix"] = prefix
     if caption is not None:
-        c.execute("UPDATE users SET caption = ? WHERE chat_id = ?", (caption, chat_id))
-    conn.commit()
-    conn.close()
+        update_fields["caption"] = caption
+    if update_fields:
+        users_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": update_fields},
+            upsert=True
+        )
 
 def get_user_settings(chat_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT thumbnail_file_id, prefix, caption FROM users WHERE chat_id = ?", (chat_id,))
-    result = c.fetchone()
-    conn.close()
-    return result
+    user = users_collection.find_one({"chat_id": chat_id})
+    if user:
+        return (user.get("thumbnail_file_id"), user.get("prefix"), user.get("caption"))
+    return None
 
 def add_movie(title, year, quality, file_size, file_id, message_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT file_id FROM movies WHERE file_id = ?", (file_id,))
-    if c.fetchone():
-        conn.close()
+    existing = movies_collection.find_one({"file_id": file_id})
+    if existing:
         return False
-    c.execute("INSERT INTO movies (title, year, quality, file_size, file_id, message_id) VALUES (?, ?, ?, ?, ?, ?)",
-              (title, year, quality, file_size, file_id, message_id))
-    conn.commit()
-    conn.close()
+    movies_collection.insert_one({
+        "title": title,
+        "year": year,
+        "quality": quality,
+        "file_size": file_size,
+        "file_id": file_id,
+        "message_id": message_id
+    })
     return True
 
 def search_movies(movie_name, year=None, language=None):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    sql_query = "SELECT title, year, quality, file_size, file_id, message_id FROM movies WHERE LOWER(title) LIKE ?"
-    params = [f"%{movie_name}%"]
+    query = {"title": {"$regex": movie_name, "$options": "i"}}  # Case-insensitive search
     if year:
-        sql_query += " AND year = ?"
-        params.append(year)
+        query["year"] = year
     if language:
-        sql_query += " AND LOWER(title) LIKE ?"
-        params.append(f"%{language}%")
-    c.execute(sql_query, params)
-    results = c.fetchall()
-    conn.close()
-    return results
+        query["title"] = {"$regex": language, "$options": "i"}
+    results = movies_collection.find(query)
+    return [(r["title"], r["year"], r["quality"], r["file_size"], r["file_id"], r["message_id"]) for r in results]
