@@ -107,7 +107,7 @@ def get_user_settings(chat_id):
         logger.error(f"Error retrieving user settings for {chat_id}: {str(e)}")
         raise
 
-def add_movie(title, year, quality, file_size, file_id, message_id, language=None):
+def add_movie(title, year, quality, file_size, file_id, message_id, language=None, channel_id=None):
     """Add a movie to movies_collection if it doesn't exist, return the _id."""
     try:
         if not isinstance(file_id, str) or not file_id:
@@ -124,6 +124,8 @@ def add_movie(title, year, quality, file_size, file_id, message_id, language=Non
             raise ValueError("file_size must be a string")
         if language and not isinstance(language, str):
             raise ValueError("language must be a string")
+        if channel_id and not isinstance(channel_id, str):
+            raise ValueError("channel_id must be a string")
 
         movie_doc = {
             "title": title,
@@ -131,13 +133,14 @@ def add_movie(title, year, quality, file_size, file_id, message_id, language=Non
             "quality": quality,
             "file_size": file_size,
             "file_id": file_id,
-            "message_id": message_id
+            "message_id": message_id,
+            "channel_id": channel_id  # Add channel_id to the document
         }
         if language:
             movie_doc["language"] = language.lower()
 
         result = movies_collection.insert_one(movie_doc)
-        logger.info(f"Added movie: {title} ({year}, {quality}, {language}) with ID {result.inserted_id}")
+        logger.info(f"Added movie: {title} ({year}, {quality}, {language}) from channel {channel_id} with ID {result.inserted_id}")
         return str(result.inserted_id)
     except DuplicateKeyError:
         logger.info(f"Skipped duplicate movie with file_id {file_id} and message_id {message_id}")
@@ -168,7 +171,7 @@ def search_movies(movie_name, year=None, language=None):
 
         results = movies_collection.find(query).limit(50)
         movies = [
-            (str(r["_id"]), r["title"], r["year"], r["quality"], r["file_size"], r["file_id"], r["message_id"])
+            (str(r["_id"]), r["title"], r["year"], r["quality"], r["file_size"], r["file_id"], r["message_id"], r.get("channel_id", "-1002559398614"))
             for r in results
         ]
         logger.info(f"Found {len(movies)} movies for query: name={movie_name}, year={year}, language={language}")
@@ -178,7 +181,7 @@ def search_movies(movie_name, year=None, language=None):
             query.pop("year")
             results = movies_collection.find(query).limit(50)
             movies = [
-                (str(r["_id"]), r["title"], r["year"], r["quality"], r["file_size"], r["file_id"], r["message_id"])
+                (str(r["_id"]), r["title"], r["year"], r["quality"], r["file_size"], r["file_id"], r["message_id"], r.get("channel_id", "-1002559398614"))
                 for r in results
             ]
             logger.info(f"Fallback search without year: Found {len(movies)} movies for name={movie_name}, language={language}")
