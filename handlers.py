@@ -1,6 +1,7 @@
 import os
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
 from database import add_user, update_user_settings, get_user_settings, add_movie
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -33,76 +34,86 @@ def start(update, context):
         "  /viewthumbnail - See your thumbnail\n"
         "  /viewprefix - See your prefix\n"
         "  /viewcaption - See your caption\n"
+        "- Admin: Use /index to index movies from any channel where I'm an admin.\n"
         "All movies are legal, public domain content."
     )
     logger.info(f"User {chat_id} started the bot")
 
 def index(update, context):
     chat_id = update.message.chat_id
-    DATABASE_CHANNEL_ID = context.bot_data.get("DATABASE_CHANNEL_ID")
-    if not DATABASE_CHANNEL_ID:
-        update.message.reply_text("Error: DATABASE_CHANNEL_ID is not configured.")
-        logger.error("DATABASE_CHANNEL_ID not set")
-        return
-    try:
-        admins = context.bot.get_chat_administrators(DATABASE_CHANNEL_ID)
-        if not any(admin.user.id == chat_id for admin in admins):
-            update.message.reply_text("Only channel admins can use /index.")
-            logger.warning(f"User {chat_id} attempted /index without admin privileges")
-            return
-        update.message.reply_text("Please forward a message from the database channel to start indexing.")
-        context.user_data['indexing'] = True
-        logger.info(f"User {chat_id} initiated indexing")
-    except Exception as e:
-        update.message.reply_text(f"Error: {str(e)}")
-        logger.error(f"Error in /index for user {chat_id}: {str(e)}")
+    update.message.reply_text("Please forward a message from a channel where I am an admin to start indexing.")
+    context.user_data['indexing'] = True
+    context.user_data['index_channel_id'] = None  # Clear any previous channel ID
+    logger.info(f"User {chat_id} initiated indexing")
 
 def handle_forwarded_message(update, context):
     if not context.user_data.get('indexing'):
         return
     message = update.message
-    DATABASE_CHANNEL_ID = context.bot_data.get("DATABASE_CHANNEL_ID")
-    if not DATABASE_CHANNEL_ID:
-        update.message.reply_text("Error: DATABASE_CHANNEL_ID is not configured.")
-        logger.error("DATABASE_CHANNEL_ID not set")
-        return
-    if not message.forward_from_chat or str(message.forward_from_chat.id) != DATABASE_CHANNEL_ID[1:]:
-        update.message.reply_text("Please forward a message from the correct database channel.")
-        logger.warning("Forwarded message from incorrect channel")
+    chat_id = update.message.chat_id
+
+    if not message.forward_from_chat:
+        update.message.reply_text("Please forward a message from a channel.")
+        logger.warning(f"User {chat_id} forwarded a non-channel message")
         return
 
+    forwarded_channel_id = f"-100{message.forward_from_chat.id}"
     try:
-        messages = []
-        offset = 0
-        while True:
-            batch = context.bot.get_chat_history(DATABASE_CHANNEL_ID, limit=100, offset=offset)
-            if not batch:
-                break
-            messages.extend(batch)
-            offset += 100
-        for message in messages:
-            if message.document and message.document.file_name.endswith('.mkv'):
-                file_name = message.document.file_name
-                file_id = message.document.file_id
-                message_id = message.message_id
-                try:
-                    parts = file_name.replace('.mkv', '').split('_')
-                    title = parts[0].replace('.', ' ')
-                    year = int(parts[1]) if len(parts) > 1 else 0
-                    quality = parts[2] if len(parts) > 2 else 'Unknown'
-                    file_size = f"{message.document.file_size / (1024 * 1024):.2f}MB"
-                    add_movie(title, year, quality, file_size, file_id, message_id)
-                    logger.info(f"Indexed movie: {title} ({year}, {quality})")
-                except (IndexError, ValueError) as e:
-                    logger.warning(f"Skipped invalid file name: {file_name} - {str(e)}")
-                    continue
-        update.message.reply_text("Indexing complete.")
-        logger.info("Indexing completed")
-    except Exception as e:
-        update.message.reply_text(f"Error indexing: {str(e)}")
-        logger.error(f"Error indexing: {str(e)}")
+        # Check if bot is an admin of the forwarded channel
+        admins = context.bot.get_chat_administrators(forwarded_channel_id)
+        bot_id = context.bot.id
+        if not any(admin.user.id == bot_id for admin in admins):
+            update.message.reply_text("I am not an admin of this channel. Please make me an admin and try again.")
+            logger.warning(f"Bot is not admin of channel {forwarded_channel_id} for user {chat_id}")
+            return
+
+        # Check if user is an admin of the channel
+        if not any(admin.user.id == chat_id for admin in admins):
+            update.message.reply_text("Only channel admins can index movies.")
+            logger.warning(f"User {chat_id} is not admin of channel {forwarded_channel_id}")
+            return
+
+        # Store the channel ID for indexing
+        context.user_data['index_channel_id'] = forwarded_channel_id
+        logger.info(f"User {chat_id} set indexing channel to {forwarded_channel_id}")
+
+        # Index messages from the channel
+        try:
+            messages = []
+            offset = 0
+            while True:
+                batch = context.bot.get_chat_history(forwarded_channel_id, limit=100, offset=offset)
+                if not batch:
+                    break
+                messages.extend(batch)
+                offset += 100
+            for message in messages:
+                if message.document and message.document.file_name.endswith('.mkv'):
+                    file_name = message.document.file_name
+                    file_id = message.document.file_id
+                    message_id = message.message_id
+                    try:
+                        parts = file_name.replace('.mkv', '').split('_')
+                        title = parts[0].replace('.', ' ')
+                        year = int(parts[1]) if len(parts) > 1 else 0
+                        quality = parts[2] if len(parts) > 2 else 'Unknown'
+                        file_size = f"{message.document.file_size / (1024 * 1024):.2f}MB"
+                        add_movie(title, year, quality, file_size, file_id, message_id)
+                        logger.info(f"Indexed movie: {title} ({year}, {quality}) from channel {forwarded_channel_id}")
+                    except (IndexError, ValueError) as e:
+                        logger.warning(f"Skipped invalid file name: {file_name} in channel {forwarded_channel_id} - {str(e)}")
+                        continue
+            update.message.reply_text(f"Indexing complete for channel {forwarded_channel_id}.")
+            logger.info(f"Indexing completed for channel {forwarded_channel_id}")
+        except TelegramError as e:
+            update.message.reply_text(f"Error indexing channel: {str(e)}")
+            logger.error(f"Error indexing channel {forwarded_channel_id}: {str(e)}")
+    except TelegramError as e:
+        update.message.reply_text(f"Error accessing channel: {str(e)}")
+        logger.error(f"Error accessing channel {forwarded_channel_id} for user {chat_id}: {str(e)}")
     finally:
         context.user_data['indexing'] = False
+        context.user_data['index_channel_id'] = None
 
 def set_thumbnail(update, context):
     update.message.reply_text("Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:")
@@ -189,17 +200,11 @@ def stats(update, context):
     """Display bot statistics: total users, total files, bot language, and owner name."""
     chat_id = update.message.chat_id
     try:
-        # Count users and movies
         total_users = users_collection.count_documents({})
         total_files = movies_collection.count_documents({})
-
-        # Bot language (hardcoded or configurable)
         bot_language = os.getenv("BOT_LANGUAGE", "English")
-
-        # Owner name (from environment variable or hardcoded)
         owner_name = os.getenv("OWNER_NAME", "MovieBot Team")
 
-        # Format stats message
         stats_message = (
             "📊 *Movie Bot Statistics* 📊\n\n"
             f"👥 *Total Users*: {total_users}\n"
