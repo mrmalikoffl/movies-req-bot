@@ -61,8 +61,18 @@ def handle_forwarded_message(update, context):
         logger.warning(f"User {chat_id} forwarded a non-channel message")
         return
 
-    forwarded_channel_id = f"-100{message.forward_from_chat.id}"
+    # Use the forwarded channel ID directly
+    forwarded_channel_id = str(message.forward_from_chat.id)
+    logger.info(f"User {chat_id} forwarded message from channel {forwarded_channel_id}")
+
+    # Validate channel ID format (should start with -100 for channels)
+    if not forwarded_channel_id.startswith('-100'):
+        update.message.reply_text("Invalid channel ID. Please forward a message from a valid Telegram channel.")
+        logger.warning(f"Invalid channel ID {forwarded_channel_id} for user {chat_id}")
+        return
+
     try:
+        # Check if bot is an admin of the forwarded channel
         admins = context.bot.get_chat_administrators(forwarded_channel_id)
         bot_id = context.bot.id
         if not any(admin.user.id == bot_id for admin in admins):
@@ -70,14 +80,17 @@ def handle_forwarded_message(update, context):
             logger.warning(f"Bot is not admin of channel {forwarded_channel_id} for user {chat_id}")
             return
 
+        # Check if user is an admin of the channel
         if not any(admin.user.id == chat_id for admin in admins):
             update.message.reply_text("Only channel admins can index movies.")
             logger.warning(f"User {chat_id} is not admin of channel {forwarded_channel_id}")
             return
 
+        # Store the channel ID for indexing
         context.user_data['index_channel_id'] = forwarded_channel_id
         logger.info(f"User {chat_id} set indexing channel to {forwarded_channel_id}")
 
+        # Index messages from the channel
         try:
             messages = []
             offset = 0
@@ -200,7 +213,6 @@ def view_caption(update, context):
         logger.info(f"User {chat_id} has default caption")
 
 def stats(update, context):
-    """Display bot statistics: total users, total files, bot language, and owner name."""
     chat_id = update.message.chat_id
     try:
         total_users = users_collection.count_documents({})
@@ -209,12 +221,12 @@ def stats(update, context):
         owner_name = os.getenv("OWNER_NAME", "MovieBot Team")
 
         stats_message = (
-            "📊 *Ms Film Factory Statistics* 📊\n\n"
+            "📊 *Movie Bot Statistics* 📊\n\n"
             f"👥 *Total Users*: {total_users}\n"
             f"🎥 *Total Movies*: {total_files}\n"
             f"🌐 *Bot Language*: {bot_language}\n"
             f"👤 *Owner*: {owner_name}\n\n"
-            "Thanks for using the Ms Film Factory! 🎉"
+            "Thanks for using the Movie Bot! 🎉"
         )
 
         update.message.reply_text(stats_message, parse_mode='Markdown')
