@@ -4,7 +4,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Inlin
 from handlers import (
     start, index, handle_forwarded_message, set_thumbnail, handle_thumbnail,
     set_prefix, handle_prefix, set_caption, handle_caption,
-    view_thumbnail, view_prefix, view_caption
+    view_thumbnail, view_prefix, view_caption, stats
 )
 from inline import inline_query, button_callback
 from database import init_db
@@ -67,6 +67,7 @@ def main():
         # Register handlers
         dp.add_handler(CommandHandler("start", start))
         dp.add_handler(CommandHandler("index", index))
+        dp.add_handler(CommandHandler("stats", stats))  # New stats handler
         dp.add_handler(MessageHandler(Filters.forwarded, handle_forwarded_message))
         dp.add_handler(conv_handler)
         dp.add_handler(CommandHandler("viewthumbnail", view_thumbnail))
