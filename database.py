@@ -23,13 +23,9 @@ except PyMongoError as e:
 def init_db():
     """Initialize database with necessary indexes."""
     try:
-        # Unique index for file_id to prevent duplicates
         movies_collection.create_index([("file_id", 1)], unique=True)
-        # Text index for title searches
         movies_collection.create_index([("title", "text")])
-        # Compound index for year and language queries
         movies_collection.create_index([("year", 1), ("language", 1)])
-        # Unique index for chat_id in users_collection
         users_collection.create_index([("chat_id", 1)], unique=True)
         logger.info("Database indexes created successfully")
     except PyMongoError as e:
