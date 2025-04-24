@@ -34,13 +34,18 @@ def init_db():
         raise
 
 def add_user(chat_id):
-    """Add or update a user in users_collection."""
+    """Add or update a user in users_collection with default settings."""
     try:
         if not isinstance(chat_id, int):
             raise ValueError("chat_id must be an integer")
         users_collection.update_one(
             {"chat_id": chat_id},
-            {"$setOnInsert": {"chat_id": chat_id}},
+            {"$setOnInsert": {
+                "chat_id": chat_id,
+                "thumbnail_file_id": None,
+                "prefix": None,
+                "caption": None
+            }},
             upsert=True
         )
         logger.info(f"Added/updated user {chat_id}")
@@ -68,12 +73,12 @@ def update_user_settings(chat_id, thumbnail_file_id=None, prefix=None, caption=N
                 raise ValueError("caption must be a string")
             update_fields["caption"] = caption
         if update_fields:
-            users_collection.update_one(
+            result = users_collection.update_one(
                 {"chat_id": chat_id},
                 {"$set": update_fields},
                 upsert=True
             )
-            logger.info(f"Updated settings for user {chat_id}: {update_fields}")
+            logger.info(f"Updated settings for user {chat_id}: {update_fields}, matched: {result.matched_count}, modified: {result.modified_count}")
     except PyMongoError as e:
         logger.error(f"Error updating user settings for {chat_id}: {str(e)}")
         raise
@@ -87,13 +92,17 @@ def get_user_settings(chat_id):
         if not isinstance(chat_id, int):
             raise ValueError("chat_id must be an integer")
         user = users_collection.find_one({"chat_id": chat_id})
-        if user:
-            return (
-                user.get("thumbnail_file_id"),
-                user.get("prefix"),
-                user.get("caption")
-            )
-        return (None, None, None)
+        if not user:
+            logger.warning(f"User {chat_id} not found in database, adding user")
+            add_user(chat_id)
+            return None, None, None
+        settings = (
+            user.get("thumbnail_file_id"),
+            user.get("prefix"),
+            user.get("caption")
+        )
+        logger.info(f"Retrieved settings for user {chat_id}: thumbnail_file_id={settings[0]}, prefix={settings[1]}, caption={settings[2]}")
+        return settings
     except PyMongoError as e:
         logger.error(f"Error retrieving user settings for {chat_id}: {str(e)}")
         raise
