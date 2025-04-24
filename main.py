@@ -19,13 +19,11 @@ load_dotenv()
 
 # Validate required environment variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-DATABASE_CHANNEL_ID = os.getenv("DATABASE_CHANNEL_ID")
 MONGO_URI = os.getenv("MONGO_URI")
 
-if not all([TELEGRAM_BOT_TOKEN, DATABASE_CHANNEL_ID, MONGO_URI]):
+if not all([TELEGRAM_BOT_TOKEN, MONGO_URI]):
     missing = [var for var, val in [
         ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
-        ("DATABASE_CHANNEL_ID", DATABASE_CHANNEL_ID),
         ("MONGO_URI", MONGO_URI)
     ] if not val]
     logger.error(f"Missing environment variables: {', '.join(missing)}")
@@ -45,10 +43,6 @@ def main():
         updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
         dp = updater.dispatcher
 
-        # Store DATABASE_CHANNEL_ID in bot_data
-        dp.bot_data["DATABASE_CHANNEL_ID"] = DATABASE_CHANNEL_ID
-        logger.info(f"Set DATABASE_CHANNEL_ID: {DATABASE_CHANNEL_ID}")
-
         # Conversation handler for settings
         conv_handler = ConversationHandler(
             entry_points=[
@@ -67,7 +61,7 @@ def main():
         # Register handlers
         dp.add_handler(CommandHandler("start", start))
         dp.add_handler(CommandHandler("index", index))
-        dp.add_handler(CommandHandler("stats", stats))  # New stats handler
+        dp.add_handler(CommandHandler("stats", stats))
         dp.add_handler(MessageHandler(Filters.forwarded, handle_forwarded_message))
         dp.add_handler(conv_handler)
         dp.add_handler(CommandHandler("viewthumbnail", view_thumbnail))
