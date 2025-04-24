@@ -12,7 +12,7 @@ from telethon.tl.functions.messages import GetHistoryRequest
 # Load environment variables
 load_dotenv()
 
-# MongoDB connection for stats
+# MongoDB connection
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["movie_bot"]
@@ -23,7 +23,7 @@ users_collection = db["users"]
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Conversation states (must match main.py)
+# Conversation states
 SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
 
 async def start(update, context):
@@ -57,12 +57,11 @@ async def index(update, context):
     context.user_data['index_channel_id'] = None
     logger.info(f"User {chat_id} initiated indexing")
 
-# In handlers.py, modify the telethon indexing part in handle_forwarded_message
 async def handle_forwarded_message(update, context):
     if update.callback_query and update.callback_query.data == 'index_cancel':
         context.user_data['indexing'] = False
         context.user_data['index_channel_id'] = None
-        await update.callback_query.message.edit_text("Indexation annulée.")
+        await update.callback_query.message.edit_text("Indexing cancelled.")
         logger.info(f"User {update.callback_query.from_user.id} cancelled indexing")
         return
 
@@ -73,7 +72,7 @@ async def handle_forwarded_message(update, context):
     chat_id = update.message.chat_id
 
     if not message.forward_from_chat:
-        await update.message.reply_text("Veuillez transférer un message depuis une chaîne.")
+        await update.message.reply_text("Please forward a message from a channel.")
         logger.warning(f"User {chat_id} forwarded a non-channel message")
         return
 
@@ -81,7 +80,7 @@ async def handle_forwarded_message(update, context):
     logger.info(f"User {chat_id} forwarded message from channel {forwarded_channel_id}")
 
     if not forwarded_channel_id.startswith('-100'):
-        await update.message.reply_text("ID de chaîne invalide. Veuillez transférer un message depuis une chaîne Telegram valide.")
+        await update.message.reply_text("Invalid channel ID. Please forward a message from a valid Telegram channel.")
         logger.warning(f"Invalid channel ID {forwarded_channel_id} for user {chat_id}")
         return
 
@@ -90,13 +89,13 @@ async def handle_forwarded_message(update, context):
         admins = await context.bot.get_chat_administrators(forwarded_channel_id)
         bot_id = context.bot.id
         if not any(admin.user.id == bot_id for admin in admins):
-            await update.message.reply_text("Je ne suis pas administrateur de cette chaîne. Veuillez me rendre administrateur et réessayer.")
+            await update.message.reply_text("I am not an admin of this channel. Please make me an admin and try again.")
             logger.warning(f"Bot is not admin of channel {forwarded_channel_id} for user {chat_id}")
             return
 
         # Verify user is admin
         if not any(admin.user.id == chat_id for admin in admins):
-            await update.message.reply_text("Seuls les administrateurs de la chaîne peuvent indexer des films.")
+            await update.message.reply_text("Only channel admins can index movies.")
             logger.warning(f"User {chat_id} is not admin of channel {forwarded_channel_id}")
             return
 
@@ -110,10 +109,25 @@ async def handle_forwarded_message(update, context):
             bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
 
             if not all([api_id, api_hash, bot_token]):
-                raise ValueError("Missing Telegram API credentials")
+                missing = [var for var, val in [
+                    ("TELEGRAM_API_ID", api_id),
+                    ("TELEGRAM_API_HASH", api_hash),
+                    ("TELEGRAM_BOT_TOKEN", bot_token)
+                ] if not val]
+                error_msg = f"Missing environment variables: {', '.join(missing)}"
+                await update.message.reply_text(f"Configuration error: {error_msg}")
+                logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
+                return
 
-            async with TelegramClient('bot', api_id, api_hash) as client:
-                await client.start(bot_token=bot_token)
+            async with TelegramClient('bot', int(api_id), api_hash) as client:
+                try:
+                    await client.start(bot_token=bot_token)
+                except Exception as auth_error:
+                    error_msg = f"Failed to authenticate TelegramClient: {str(auth_error)}"
+                    await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
+                    logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
+                    return
+
                 total_files = 0
                 duplicate = 0
                 errors = 0
@@ -125,13 +139,13 @@ async def handle_forwarded_message(update, context):
                     current += 1
                     if current % 20 == 0:
                         await update.message.reply_text(
-                            f"Total des messages récupérés : {current}\n"
-                            f"Total des films enregistrés : {total_files}\n"
-                            f"Films en double ignorés : {duplicate}\n"
-                            f"Fichiers non pris en charge ignorés : {unsupported}\n"
-                            f"Erreurs survenues : {errors}",
+                            f"Total messages fetched: {current}\n"
+                            f"Total movies saved: {total_files}\n"
+                            f"Duplicate movies skipped: {duplicate}\n"
+                            f"Unsupported files skipped: {unsupported}\n"
+                            f"Errors occurred: {errors}",
                             reply_markup=InlineKeyboardMarkup(
-                                [[InlineKeyboardButton('Annuler', callback_data='index_cancel')]]
+                                [[InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
                             )
                         )
 
@@ -141,6 +155,14 @@ async def handle_forwarded_message(update, context):
 
                     file_name = msg.document.attributes[-1].file_name
                     message_id = msg.id
+
+                    # Detect language from file_name
+                    language = None
+                    if 'tamil' in file_name.lower():
+                        language = 'tamil'
+                    elif 'english' in file_name.lower():
+                        language = 'english'
+                    # Add more language detection as needed
 
                     # Fetch Telegram file ID
                     try:
@@ -153,7 +175,6 @@ async def handle_forwarded_message(update, context):
                             unsupported += 1
                             continue
                         file_id = forwarded.document.file_id
-                        # Clean up forwarded message
                         await context.bot.delete_message(chat_id=context.bot.id, message_id=forwarded.message_id)
                     except TelegramError as te:
                         logger.error(f"Error fetching Telegram file ID for message {message_id}: {str(te)}")
@@ -166,8 +187,8 @@ async def handle_forwarded_message(update, context):
                         year = int(parts[1]) if len(parts) > 1 else 0
                         quality = parts[2] if len(parts) > 2 else 'Unknown'
                         file_size = f"{msg.document.size / (1024 * 1024):.2f}MB"
-                        if add_movie(title, year, quality, file_size, file_id, message_id):
-                            logger.info(f"Indexed movie: {title} ({year}, {quality}) from channel {forwarded_channel_id}")
+                        if add_movie(title, year, quality, file_size, file_id, message_id, language=language):
+                            logger.info(f"Indexed movie: {title} ({year}, {quality}, {language}) from channel {forwarded_channel_id}")
                             total_files += 1
                         else:
                             logger.info(f"Skipped duplicate movie: {file_name} in channel {forwarded_channel_id}")
@@ -177,21 +198,21 @@ async def handle_forwarded_message(update, context):
                         errors += 1
 
                 await update.message.reply_text(
-                    f"✅ Indexation terminée pour la chaîne {forwarded_channel_id}.\n"
-                    f"Films indexés : {total_files}\n"
-                    f"Films en double ignorés : {duplicate}\n"
-                    f"Fichiers non pris en charge ignorés : {unsupported}\n"
-                    f"Erreurs survenues : {errors}",
+                    f"✅ Indexing completed for channel {forwarded_channel_id}.\n"
+                    f"Movies indexed: {total_files}\n"
+                    f"Duplicate movies skipped: {duplicate}\n"
+                    f"Unsupported files skipped: {unsupported}\n"
+                    f"Errors occurred: {errors}",
                     reply_markup=None
                 )
                 logger.info(f"Indexing completed for channel {forwarded_channel_id}: {total_files} indexed, {duplicate} duplicates, {unsupported} unsupported, {errors} errors")
 
         except Exception as e:
-            await update.message.reply_text(f"Erreur lors de l'indexation de la chaîne : {str(e)}")
+            await update.message.reply_text(f"Error indexing channel: {str(e)}")
             logger.error(f"Error indexing channel {forwarded_channel_id}: {str(e)}")
 
     except TelegramError as e:
-        await update.message.reply_text(f"Erreur d'accès à la chaîne : {str(e)}")
+        await update.message.reply_text(f"Error accessing channel: {str(e)}")
         logger.error(f"Error accessing channel {forwarded_channel_id} for user {chat_id}: {str(e)}")
 
     finally:
@@ -214,16 +235,16 @@ async def handle_thumbnail(update, context):
     elif update.message.photo:
         thumbnail_file_id = update.message.photo[-1].file_id
         update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
-        await update.message.reply_text("✅ changements de vignettes personnalisées réussis !")
+        await update.message.reply_text("✅ Custom thumbnail set successfully!")
         logger.info(f"User {chat_id} set thumbnail: {thumbnail_file_id}")
         return ConversationHandler.END
     else:
-        await update.message.reply_text("Entrée non valide. Veuillez télécharger une image ou taper 'default'.")
+        await update.message.reply_text("Invalid input. Please upload an image or type 'default'.")
         logger.warning(f"Invalid thumbnail input from user {chat_id}")
         return SET_THUMBNAIL
 
 async def set_prefix(update, context):
-    await update.message.reply_text("Veuillez entrer votre préfixe de nom de fichier personnalisé (par exemple, MaCollection_) :")
+    await update.message.reply_text("Please enter your custom filename prefix (e.g., MyCollection_):")
     logger.info(f"User {update.message.chat_id} initiated /setprefix")
     return SET_PREFIX
 
@@ -234,12 +255,12 @@ async def handle_prefix(update, context):
         prefix += '_'
 
     update_user_settings(chat_id, prefix=prefix)
-    await update.message.reply_text(f"✅ Préfixe personnalisé défini à : {prefix}")
+    await update.message.reply_text(f"✅ Custom prefix set to: {prefix}")
     logger.info(f"User {chat_id} set prefix: {prefix}")
     return ConversationHandler.END
 
 async def set_caption(update, context):
-    await update.message.reply_text("Veuillez entrer votre légende personnalisée (par exemple, Mon film préféré !) :")
+    await update.message.reply_text("Please enter your custom caption (e.g., My favorite movie!):")
     logger.info(f"User {update.message.chat_id} initiated /setcaption")
     return SET_CAPTION
 
@@ -248,7 +269,7 @@ async def handle_caption(update, context):
     caption = update.message.text.strip()
 
     update_user_settings(chat_id, caption=caption)
-    await update.message.reply_text(f"✅ Légende personnalisée définie à : {caption}")
+    await update.message.reply_text(f"✅ Custom caption set to: {caption}")
     logger.info(f"User {chat_id} set caption: {caption}")
     return ConversationHandler.END
 
@@ -256,30 +277,30 @@ async def view_thumbnail(update, context):
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
     if settings and settings[0]:
-        await update.message.reply_photo(photo=settings[0], caption="Votre vignette actuelle")
+        await update.message.reply_photo(photo=settings[0], caption="Your current thumbnail")
         logger.info(f"User {chat_id} viewed thumbnail")
     else:
-        await update.message.reply_text("Votre vignette est définie par défaut (carré bleu).")
+        await update.message.reply_text("Your thumbnail is set to default (blue square).")
         logger.info(f"User {chat_id} has default thumbnail")
 
 async def view_prefix(update, context):
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
     if settings and settings[1]:
-        await update.message.reply_text(f"Votre préfixe : {settings[1]}")
+        await update.message.reply_text(f"Your prefix: {settings[1]}")
         logger.info(f"User {chat_id} viewed prefix: {settings[1]}")
     else:
-        await update.message.reply_text("Aucun préfixe défini.")
+        await update.message.reply_text("No prefix set.")
         logger.info(f"User {chat_id} has no prefix set")
 
 async def view_caption(update, context):
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
     if settings and settings[2]:
-        await update.message.reply_text(f"Votre légende : {settings[2]}")
+        await update.message.reply_text(f"Your caption: {settings[2]}")
         logger.info(f"User {chat_id} viewed caption: {settings[2]}")
     else:
-        await update.message.reply_text("Votre légende est définie par défaut : 'Profitez du film !'")
+        await update.message.reply_text("Your caption is set to default: 'Enjoy the movie!'")
         logger.info(f"User {chat_id} has default caption")
 
 async def stats(update, context):
@@ -287,20 +308,20 @@ async def stats(update, context):
     try:
         total_users = users_collection.count_documents({})
         total_files = movies_collection.count_documents({})
-        bot_language = os.getenv("BONGO_URI", "French")
+        bot_language = "English"  # Hardcoded to English
         owner_name = os.getenv("OWNER_NAME", "MovieBot Team")
 
         stats_message = (
-            "📊 *Statistiques du Movie Bot* 📊\n\n"
-            f"👥 *Total des utilisateurs* : {total_users}\n"
-            f"🎥 *Total des films* : {total_files}\n"
-            f"🌐 *Langue du bot* : {bot_language}\n"
-            f"👤 *Propriétaire* : {owner_name}\n\n"
-            "Merci d'utiliser le Movie Bot ! 🎉"
+            "📊 *Movie Bot Stats* 📊\n\n"
+            f"👥 *Total Users*: {total_users}\n"
+            f"🎥 *Total Movies*: {total_files}\n"
+            f"🌐 *Bot Language*: {bot_language}\n"
+            f"👤 *Owner*: {owner_name}\n\n"
+            "Thank you for using Movie Bot! 🎉"
         )
 
         await update.message.reply_text(stats_message, parse_mode='Markdown')
         logger.info(f"User {chat_id} viewed bot stats: {total_users} users, {total_files} movies")
     except Exception as e:
-        await update.message.reply_text("Erreur lors de la récupération des statistiques. Veuillez réessayer plus tard.")
+        await update.message.reply_text("Error retrieving stats. Please try again later.")
         logger.error(f"Error retrieving stats for user {chat_id}: {str(e)}")
