@@ -1,14 +1,21 @@
 import os
 import logging
+import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 from telegram.ext import ConversationHandler
 from database import add_user, update_user_settings, get_user_settings, add_movie, search_movies
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from telethon import TelegramClient
-from telethon.tl.functions.messages import GetHistoryRequest
-from telethon.errors import SessionPasswordNeededError, RPCError
+from telethon.sessions import StringSession
+from telethon.errors import (
+    SessionPasswordNeededError,
+    RPCError,
+    FloodWaitError,
+    ChannelPrivateError,
+    AuthKeyError
+)
 
 # Load environment variables
 load_dotenv()
@@ -21,7 +28,10 @@ movies_collection = db["movies"]
 users_collection = db["users"]
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Conversation states
@@ -104,74 +114,62 @@ async def handle_forwarded_message(update, context):
         logger.info(f"User {chat_id} set indexing channel to {forwarded_channel_id}")
 
         # Use telethon to fetch messages
+        api_id = os.getenv("TELEGRAM_API_ID")
+        api_hash = os.getenv("TELEGRAM_API_HASH")
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+        if not all([api_id, api_hash, bot_token]):
+            missing = [var for var, val in [
+                ("TELEGRAM_API_ID", api_id),
+                ("TELEGRAM_API_HASH", api_hash),
+                ("TELEGRAM_BOT_TOKEN", bot_token)
+            ] if not val]
+            error_msg = f"Missing environment variables: {', '.join(missing)}"
+            await update.message.reply_text(f"Configuration error: {error_msg}")
+            logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
+            return
+
+        # Initialize progress message
+        progress_msg = await update.message.reply_text(
+            "Starting indexing process...",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
+            )
+        )
+
         try:
-            api_id = os.getenv("TELEGRAM_API_ID")
-            api_hash = os.getenv("TELEGRAM_API_HASH")
-            bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+            client = TelegramClient(StringSession(), int(api_id), api_hash)
+            await client.start(bot_token=bot_token)
+            logger.info("TelegramClient authenticated successfully")
 
-            # Strip bot token to remove any whitespace
-            if bot_token:
-                bot_token = bot_token.strip()
+            total_files = 0
+            duplicate = 0
+            errors = 0
+            unsupported = 0
+            current = 0
+            max_messages = 1000  # Limit to prevent timeouts
 
-            logger.info(f"TELEGRAM_API_ID: {api_id}")
-            logger.info(f"TELEGRAM_API_HASH: {api_hash}")
-            logger.info(f"TELEGRAM_BOT_TOKEN: {bot_token[:10]}...")
+            async for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
+                if not context.user_data.get('indexing'):
+                    break
 
-            if not all([api_id, api_hash, bot_token]):
-                missing = [var for var, val in [
-                    ("TELEGRAM_API_ID", api_id),
-                    ("TELEGRAM_API_HASH", api_hash),
-                    ("TELEGRAM_BOT_TOKEN", bot_token)
-                ] if not val]
-                error_msg = f"Missing environment variables: {', '.join(missing)}"
-                await update.message.reply_text(f"Configuration error: {error_msg}")
-                logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
-                return
-
-            # Create TelegramClient with bot token
-            client = TelegramClient('bot_session_2025', int(api_id), api_hash)
-            async with client:
+                current += 1
                 try:
-                    # Start the client with the bot token (non-interactive)
-                    await client.start(bot_token=bot_token)
-                    logger.info(f"TelegramClient authenticated successfully for channel {forwarded_channel_id}")
-                except SessionPasswordNeededError:
-                    error_msg = "Bot token requires 2FA, which is not supported for bots."
-                    await update.message.reply_text("Authentication error: Bot token issue. Please contact the administrator.")
-                    logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
-                    return
-                except RPCError as rpc_error:
-                    error_msg = f"Telegram RPC error: {str(rpc_error)}"
-                    await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
-                    logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
-                    return
-                except Exception as auth_error:
-                    error_msg = f"Failed to authenticate TelegramClient: {str(auth_error)}"
-                    await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
-                    logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
-                    return
-
-                total_files = 0
-                duplicate = 0
-                errors = 0
-                unsupported = 0
-                current = 0
-                max_messages = 1000
-
-                async for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
-                    current += 1
+                    # Update progress every 20 messages
                     if current % 20 == 0:
-                        await update.message.reply_text(
-                            f"Total messages fetched: {current}\n"
-                            f"Total movies saved: {total_files}\n"
-                            f"Duplicate movies skipped: {duplicate}\n"
-                            f"Unsupported files skipped: {unsupported}\n"
-                            f"Errors occurred: {errors}",
-                            reply_markup=InlineKeyboardMarkup(
-                                [[InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
+                        await context.bot.edit_message_text(
+                            chat_id=progress_msg.chat_id,
+                            message_id=progress_msg.message_id,
+                            text=(
+                                f"Indexing in progress...\n"
+                                f"Messages processed: {current}\n"
+                                f"Movies indexed: {total_files}\n"
+                                f"Duplicates skipped: {duplicate}\n"
+                                f"Unsupported skipped: {unsupported}"
                             )
                         )
 
+                    # Skip non-documents or non-MKV files
                     if not msg.document or msg.document.mime_type != 'video/x-matroska':
                         unsupported += 1
                         continue
@@ -179,14 +177,17 @@ async def handle_forwarded_message(update, context):
                     file_name = msg.document.attributes[-1].file_name
                     message_id = msg.id
 
-                    # Detect language from file_name
+                    # Detect language from filename
                     language = None
-                    if 'tamil' in file_name.lower():
+                    name_lower = file_name.lower()
+                    if 'tamil' in name_lower:
                         language = 'tamil'
-                    elif 'english' in file_name.lower():
+                    elif 'english' in name_lower:
                         language = 'english'
+                    elif 'hindi' in name_lower:
+                        language = 'hindi'
 
-                    # Fetch Telegram file ID
+                    # Get file ID by forwarding to bot
                     try:
                         forwarded = await context.bot.forward_message(
                             chat_id=context.bot.id,
@@ -196,53 +197,98 @@ async def handle_forwarded_message(update, context):
                         if not forwarded.document:
                             unsupported += 1
                             continue
+                        
                         file_id = forwarded.document.file_id
-                        await context.bot.delete_message(chat_id=context.bot.id, message_id=forwarded.message_id)
-                    except TelegramError as te:
-                        logger.error(f"Error fetching Telegram file ID for message {message_id}: {str(te)}")
+                        await context.bot.delete_message(
+                            chat_id=context.bot.id,
+                            message_id=forwarded.message_id
+                        )
+                    except (TelegramError, BadRequest) as te:
+                        logger.error(f"Error getting file ID for {file_name}: {str(te)}")
                         errors += 1
                         continue
 
+                    # Parse movie info
                     try:
-                        parts = file_name.replace('.mkv', '').split('_')
-                        title = parts[0].replace('.', ' ')
-                        year = int(parts[1]) if len(parts) > 1 else 0
-                        quality = parts[2] if len(parts) > 2 else 'Unknown'
-                        file_size = f"{msg.document.size / (1024 * 1024):.2f}MB"
-                        if msg.document.size >= 1024 * 1024 * 1024:  # Convert to GB if size >= 1GB
-                            file_size = f"{msg.document.size / (1024 * 1024 * 1024):.2f}GB"
-                        movie_id = add_movie(title, year, quality, file_size, file_id, message_id, language=language)
-                        if movie_id:
-                            logger.info(f"Indexed movie: {title} ({year}, {quality}, {language}) from channel {forwarded_channel_id}")
-                            total_files += 1
+                        clean_name = file_name.replace('.mkv', '').split('_')
+                        title = clean_name[0].replace('.', ' ').strip()
+                        year = int(clean_name[1]) if len(clean_name) > 1 and clean_name[1].isdigit() else 0
+                        quality = clean_name[2] if len(clean_name) > 2 else 'Unknown'
+                        
+                        # Format file size
+                        size_bytes = msg.document.size
+                        if size_bytes >= 1024 * 1024 * 1024:
+                            file_size = f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
                         else:
-                            logger.info(f"Skipped duplicate movie: {file_name} in channel {forwarded_channel_id}")
+                            file_size = f"{size_bytes / (1024 * 1024):.2f}MB"
+
+                        # Add to database
+                        movie_id = add_movie(
+                            title=title,
+                            year=year,
+                            quality=quality,
+                            file_size=file_size,
+                            file_id=file_id,
+                            message_id=message_id,
+                            language=language
+                        )
+                        
+                        if movie_id:
+                            total_files += 1
+                            logger.info(f"Indexed: {title} ({year})")
+                        else:
                             duplicate += 1
-                    except (IndexError, ValueError) as e:
-                        logger.warning(f"Skipped invalid file name: {file_name} in channel {forwarded_channel_id} - {str(e)}")
+                    except (IndexError, ValueError, AttributeError) as e:
+                        logger.warning(f"Error parsing {file_name}: {str(e)}")
                         errors += 1
 
-                await update.message.reply_text(
-                    f"✅ Indexing completed for channel {forwarded_channel_id}.\n"
-                    f"Movies indexed: {total_files}\n"
-                    f"Duplicate movies skipped: {duplicate}\n"
-                    f"Unsupported files skipped: {unsupported}\n"
-                    f"Errors occurred: {errors}",
-                    reply_markup=None
-                )
-                logger.info(f"Indexing completed for channel {forwarded_channel_id}: {total_files} indexed, {duplicate} duplicates, {unsupported} unsupported, {errors} errors")
+                except Exception as e:
+                    logger.error(f"Error processing message {message_id}: {str(e)}")
+                    errors += 1
+                    continue
 
+            # Final report
+            result_msg = (
+                f"✅ Indexing completed for channel {forwarded_channel_id}.\n"
+                f"• Total messages processed: {current}\n"
+                f"• Movies indexed: {total_files}\n"
+                f"• Duplicates skipped: {duplicate}\n"
+                f"• Unsupported files: {unsupported}\n"
+                f"• Errors occurred: {errors}"
+            )
+            
+            await context.bot.edit_message_text(
+                chat_id=progress_msg.chat_id,
+                message_id=progress_msg.message_id,
+                text=result_msg
+            )
+            logger.info(f"Indexing completed for {forwarded_channel_id}")
+
+        except FloodWaitError as fwe:
+            await update.message.reply_text(f"Flood wait error: Please wait {fwe.seconds} seconds before trying again.")
+            logger.error(f"Flood wait error: {fwe.seconds} seconds")
+        except ChannelPrivateError:
+            await update.message.reply_text("I don't have access to this channel. Please make sure I'm an admin.")
+            logger.error("Channel access denied")
+        except AuthKeyError:
+            await update.message.reply_text("Authentication failed. Please check your API credentials.")
+            logger.error("Telethon authentication failed")
+        except RPCError as rpc_error:
+            await update.message.reply_text(f"Telegram API error: {str(rpc_error)}")
+            logger.error(f"RPC Error: {str(rpc_error)}")
         except Exception as e:
-            await update.message.reply_text(f"Error indexing channel: {str(e)}")
-            logger.error(f"Error indexing channel {forwarded_channel_id}: {str(e)}")
+            await update.message.reply_text(f"Unexpected error: {str(e)}")
+            logger.error(f"Indexing failed: {str(e)}", exc_info=True)
+        finally:
+            if 'client' in locals() and client.is_connected():
+                await client.disconnect()
+            context.user_data['indexing'] = False
+            context.user_data['index_channel_id'] = None
 
-    except TelegramError as e:
-        await update.message.reply_text(f"Error accessing channel: {str(e)}")
-        logger.error(f"Error accessing channel {forwarded_channel_id} for user {chat_id}: {str(e)}")
-
-    finally:
+    except TelegramError as te:
+        await update.message.reply_text(f"Error accessing channel: {str(te)}")
+        logger.error(f"Channel access error: {str(te)}")
         context.user_data['indexing'] = False
-        context.user_data['index_channel_id'] = None
 
 async def search_movie(update, context):
     """Handle text-based movie search in personal messages."""
