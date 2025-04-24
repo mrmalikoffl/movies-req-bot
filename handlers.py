@@ -8,6 +8,7 @@ from pymongo import MongoClient
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.tl.functions.messages import GetHistoryRequest
+from telethon.errors import SessionPasswordNeededError, RPCError
 
 # Load environment variables
 load_dotenv()
@@ -108,6 +109,10 @@ async def handle_forwarded_message(update, context):
             api_hash = os.getenv("TELEGRAM_API_HASH")
             bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
 
+            # Strip bot token to remove any whitespace
+            if bot_token:
+                bot_token = bot_token.strip()
+
             logger.info(f"TELEGRAM_API_ID: {api_id}")
             logger.info(f"TELEGRAM_API_HASH: {api_hash}")
             logger.info(f"TELEGRAM_BOT_TOKEN: {bot_token[:10]}...")
@@ -123,10 +128,23 @@ async def handle_forwarded_message(update, context):
                 logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
                 return
 
-            async with TelegramClient('bot_session_2025', int(api_id), api_hash) as client:
+            # Create TelegramClient with bot token
+            client = TelegramClient('bot_session_2025', int(api_id), api_hash)
+            async with client:
                 try:
+                    # Start the client with the bot token (non-interactive)
                     await client.start(bot_token=bot_token)
                     logger.info(f"TelegramClient authenticated successfully for channel {forwarded_channel_id}")
+                except SessionPasswordNeededError:
+                    error_msg = "Bot token requires 2FA, which is not supported for bots."
+                    await update.message.reply_text("Authentication error: Bot token issue. Please contact the administrator.")
+                    logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
+                    return
+                except RPCError as rpc_error:
+                    error_msg = f"Telegram RPC error: {str(rpc_error)}"
+                    await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
+                    logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
+                    return
                 except Exception as auth_error:
                     error_msg = f"Failed to authenticate TelegramClient: {str(auth_error)}"
                     await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
@@ -191,6 +209,8 @@ async def handle_forwarded_message(update, context):
                         year = int(parts[1]) if len(parts) > 1 else 0
                         quality = parts[2] if len(parts) > 2 else 'Unknown'
                         file_size = f"{msg.document.size / (1024 * 1024):.2f}MB"
+                        if msg.document.size >= 1024 * 1024 * 1024:  # Convert to GB if size >= 1GB
+                            file_size = f"{msg.document.size / (1024 * 1024 * 1024):.2f}GB"
                         movie_id = add_movie(title, year, quality, file_size, file_id, message_id, language=language)
                         if movie_id:
                             logger.info(f"Indexed movie: {title} ({year}, {quality}, {language}) from channel {forwarded_channel_id}")
