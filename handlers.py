@@ -16,6 +16,7 @@ from telethon.errors import (
     ChannelPrivateError,
     AuthKeyError
 )
+from bson.objectid import ObjectId  # Added for ObjectId conversion
 
 # Load environment variables
 load_dotenv()
@@ -215,7 +216,7 @@ async def handle_forwarded_message(update, context):
                         year = int(clean_name[1]) if len(clean_name) > 1 and clean_name[1].isdigit() else 0
                         quality = clean_name[2] if len(clean_name) > 2 else 'Unknown'
                         
-                        # Format file size
+                        # Format file size 
                         size_bytes = msg.document.size
                         if size_bytes >= 1024 * 1024 * 1024:
                             file_size = f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
@@ -347,9 +348,14 @@ async def search_movie(update, context):
 
         # Format results
         results = []
-        for movie_id, title, movie_year, quality, file_size, file_id, message_id in movies:
-            language_str = language if language else ''
-            result_line = f"[{file_size}] {title} {movie_year} {language_str} {quality}".strip()
+        for movie_data in movies:
+            movie_id, title, movie_year, quality, file_size, file_id, message_id = movie_data[:7]
+            # Fetch the movie document to get the language
+            movie_doc = movies_collection.find_one({"_id": ObjectId(movie_id)})
+            movie_language = movie_doc.get('language', '') if movie_doc else ''
+            language_str = movie_language if movie_language else (language if language else '')
+            year_str = str(movie_year) if movie_year != 0 else ''
+            result_line = f"[{file_size}] {title} {year_str} {language_str} {quality}".strip()
             results.append((result_line, movie_id))
 
         # Send results as a single message with buttons
@@ -383,7 +389,8 @@ async def button_callback(update, context):
 
     try:
         movie_id = data.split("_", 1)[1]
-        movie = movies_collection.find_one({"_id": movie_id})
+        # Convert movie_id string to ObjectId
+        movie = movies_collection.find_one({"_id": ObjectId(movie_id)})
 
         if not movie:
             await query.message.reply_text("Movie not found. It may have been deleted.")
@@ -393,7 +400,8 @@ async def button_callback(update, context):
 
         thumbnail_file_id, prefix, caption = get_user_settings(user_id)
         language_str = f" {movie['language']}" if movie.get('language') else ''
-        default_caption = f"{movie['title']} ({movie['year']}) {language_str} {movie['quality']}"
+        year_str = str(movie['year']) if movie['year'] != 0 else ''
+        default_caption = f"{movie['title']} ({year_str}) {language_str} {movie['quality']}"
         final_caption = caption or default_caption
 
         await query.message.reply_document(
