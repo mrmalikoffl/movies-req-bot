@@ -1,5 +1,7 @@
 import os
 import logging
+import asyncio
+import signal
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -23,10 +25,12 @@ from handlers import (
     view_thumbnail,
     view_prefix,
     view_caption,
-    stats
+    stats,
+    SET_THUMBNAIL,
+    SET_PREFIX,
+    SET_CAPTION
 )
 from dotenv import load_dotenv
-import asyncio
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,19 +43,21 @@ if not TELEGRAM_BOT_TOKEN:
     logger.error("Missing TELEGRAM_BOT_TOKEN")
     raise ValueError("Missing TELEGRAM_BOT_TOKEN")
 
-# Conversation states
-SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
+# Global variable to track recent searches for deduplication
+recent_searches = {}
 
 async def error_handler(update, context):
     logger.error(f"Update {update} caused error: {context.error}")
-    if update and hasattr(update, 'message'):
-        await update.message.reply_text("An error occurred. Please try again later.")
-    elif update and hasattr(update, 'callback_query'):
-        await update.callback_query.message.reply_text("An error occurred. Please try again later.")
+    if update:
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text("An error occurred. Please try again later.")
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.message.reply_text("An error occurred. Please try again later.")
+            await update.callback_query.answer()
 
 async def main():
     try:
-        logger.info("Starting Telegram bot")
+        logger.info(f"Starting Telegram bot with token: {TELEGRAM_BOT_TOKEN[:10]}...")
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
         # Command handlers
@@ -89,22 +95,33 @@ async def main():
         application.add_handler(caption_conv)
 
         # Indexing handler
-        application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded_message))
-        application.add_handler(CallbackQueryHandler(handle_forwarded_message, pattern='index_cancel'))
+        application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, handle_forwarded_message))
+        application.add_handler(CallbackQueryHandler(handle_forwarded_message, pattern='^index_cancel$'))
 
         # Search and download handlers
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_movie))
-        application.add_handler(CallbackQueryHandler(button_callback, pattern='download_.*'))
+        application.add_handler(CallbackQueryHandler(button_callback, pattern='^download_.*$'))
 
         # Error handler
         application.add_error_handler(error_handler)
+
+        # Set up signal handlers for graceful shutdown
+        def shutdown_handler(signum, frame):
+            logger.info("Received shutdown signal, stopping bot...")
+            asyncio.create_task(application.updater.stop())
+            asyncio.create_task(application.stop())
+            asyncio.create_task(application.shutdown())
+
+        signal.signal(signal.SIGINT, shutdown_handler)
+        signal.signal(signal.SIGTERM, shutdown_handler)
 
         logger.info("Bot started polling")
         await application.initialize()
         await application.start()
         await application.updater.start_polling()
         logger.info("Bot is polling...")
-        await asyncio.Event().wait()
+        await asyncio.Event().wait()  # Keep the bot running
+
     except Exception as e:
         logger.error(f"Fatal error in main: {str(e)}")
         raise
