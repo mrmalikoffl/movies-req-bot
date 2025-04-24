@@ -108,6 +108,11 @@ async def handle_forwarded_message(update, context):
             api_hash = os.getenv("TELEGRAM_API_HASH")
             bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
 
+            # Debug logging for environment variables
+            logger.info(f"TELEGRAM_API_ID: {api_id}")
+            logger.info(f"TELEGRAM_API_HASH: {api_hash}")
+            logger.info(f"TELEGRAM_BOT_TOKEN: {bot_token[:10]}...")  # Partial token for security
+
             if not all([api_id, api_hash, bot_token]):
                 missing = [var for var, val in [
                     ("TELEGRAM_API_ID", api_id),
@@ -119,9 +124,11 @@ async def handle_forwarded_message(update, context):
                 logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
                 return
 
-            async with TelegramClient('bot', int(api_id), api_hash) as client:
+            # Use a unique session name to avoid corrupted session files
+            async with TelegramClient('bot_session_2025', int(api_id), api_hash) as client:
                 try:
                     await client.start(bot_token=bot_token)
+                    logger.info(f"TelegramClient authenticated successfully for channel {forwarded_channel_id}")
                 except Exception as auth_error:
                     error_msg = f"Failed to authenticate TelegramClient: {str(auth_error)}"
                     await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
@@ -218,7 +225,7 @@ async def handle_forwarded_message(update, context):
     finally:
         context.user_data['indexing'] = False
         context.user_data['index_channel_id'] = None
-        
+
 async def set_thumbnail(update, context):
     await update.message.reply_text("Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:")
     logger.info(f"User {update.message.chat_id} initiated /setthumbnail")
@@ -308,7 +315,7 @@ async def stats(update, context):
     try:
         total_users = users_collection.count_documents({})
         total_files = movies_collection.count_documents({})
-        bot_language = "English"  # Hardcoded to English
+        bot_language = "English"
         owner_name = os.getenv("OWNER_NAME", "MovieBot Team")
 
         stats_message = (
