@@ -2,21 +2,16 @@ import os
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
-
-# MongoDB connection (loaded from environment variable)
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://moviebotuser:<password>@moviebotcluster.mongodb.net/?retryWrites=true&w=majority")
 client = MongoClient(MONGO_URI)
-db = client["movie_bot"]  # Database name
-movies_collection = db["movies"]  # Collection for movies
-users_collection = db["users"]  # Collection for users
+db = client["movie_bot"]
+movies_collection = db["movies"]
+users_collection = db["users"]
 
 def init_db():
-    # Create indexes for efficient queries
     movies_collection.create_index([("file_id", 1)], unique=True)
     users_collection.create_index([("chat_id", 1)], unique=True)
-    # MongoDB collections are created automatically when data is inserted
 
 def add_user(chat_id):
     users_collection.update_one(
@@ -61,7 +56,7 @@ def add_movie(title, year, quality, file_size, file_id, message_id):
     return True
 
 def search_movies(movie_name, year=None, language=None):
-    query = {"title": {"$regex": movie_name, "$options": "i"}}  # Case-insensitive search
+    query = {"title": {"$regex": movie_name, "$options": "i"}}
     if year:
         query["year"] = year
     if language:
