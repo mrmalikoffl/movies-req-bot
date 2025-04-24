@@ -124,18 +124,16 @@ async def handle_forwarded_message(update, context):
                 logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
                 return
 
-            # Use sync client to avoid async issues
-            client = TelegramClient('bot_session_2025', int(api_id), api_hash)
-            try:
-                client.start(bot_token=bot_token)
-                logger.info(f"TelegramClient authenticated successfully for channel {forwarded_channel_id}")
-            except Exception as auth_error:
-                error_msg = f"Failed to authenticate TelegramClient: {str(auth_error)}"
-                await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
-                logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
-                return
+            async with TelegramClient('bot_session_2025', int(api_id), api_hash) as client:
+                try:
+                    await client.start(bot_token=bot_token)
+                    logger.info(f"TelegramClient authenticated successfully for channel {forwarded_channel_id}")
+                except Exception as auth_error:
+                    error_msg = f"Failed to authenticate TelegramClient: {str(auth_error)}"
+                    await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
+                    logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
+                    return
 
-            with client:
                 total_files = 0
                 duplicate = 0
                 errors = 0
@@ -143,7 +141,7 @@ async def handle_forwarded_message(update, context):
                 current = 0
                 max_messages = 1000
 
-                for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
+                async for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
                     current += 1
                     if current % 20 == 0:
                         await update.message.reply_text(
