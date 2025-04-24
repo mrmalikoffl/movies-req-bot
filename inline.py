@@ -23,12 +23,16 @@ async def inline_query(update, context):
     query = update.inline_query.query.strip()
     user_id = update.inline_query.from_user.id
 
+    logger.info(f"User {user_id} sent inline query: '{query}'")
+
     if not query:
-        await update.inline_query.answer([])
+        await update.inline_query.answer(
+            [],
+            switch_pm_text="Type a movie name to search",
+            switch_pm_parameter="empty_query"
+        )
         logger.info(f"User {user_id} sent empty inline query")
         return
-
-    logger.info(f"User {user_id} sent inline query: {query}")
 
     try:
         # Split query into terms for flexible matching
@@ -36,7 +40,6 @@ async def inline_query(update, context):
         year = None
         language = None
         try:
-            # Extract year if present (e.g., "1921" in "The Kid 1921")
             for term in search_terms:
                 if term.isdigit() and len(term) == 4:
                     year = int(term)
@@ -49,7 +52,7 @@ async def inline_query(update, context):
         language_terms = ['tamil', 'english', 'hindi']
         for term in search_terms[:]:
             if term.lower() in language_terms:
-                language = term
+                language = term.lower()
                 search_terms.remove(term)
 
         movie_name = " ".join(search_terms)
@@ -61,7 +64,7 @@ async def inline_query(update, context):
                 switch_pm_text="No movies found. Try another search.",
                 switch_pm_parameter="no_results"
             )
-            logger.info(f"No movies found for query: {query} by user {user_id}")
+            logger.info(f"No movies found for query: '{query}' by user {user_id}")
             return
 
         results = []
@@ -80,7 +83,7 @@ async def inline_query(update, context):
                 )
             )
 
-        logger.info(f"Found {len(results)} movies for query: {query} by user {user_id}")
+        logger.info(f"Found {len(results)} movies for query: '{query}' by user {user_id}")
         await update.inline_query.answer(
             results,
             cache_time=300,
