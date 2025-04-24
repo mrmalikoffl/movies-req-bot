@@ -49,9 +49,9 @@ async def error_handler(update, context):
     """Handle errors and log them."""
     logger.error(f"Update {update} caused error: {context.error}")
     if update and hasattr(update, 'message'):
-        await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer plus tard.")
+        await update.message.reply_text("An error occurred. Please try again later.")
     elif update and hasattr(update, 'callback_query'):
-        await update.callback_query.message.reply_text("Une erreur s'est produite. Veuillez réessayer plus tard.")
+        await update.callback_query.message.reply_text("An error occurred. Please try again later.")
 
 async def main():
     try:
@@ -99,7 +99,7 @@ async def main():
         await application.updater.start_polling()
         logger.info("Bot is polling...")
 
-        # Keep the bot running until stopped
+        # Keep the bot running
         await asyncio.Event().wait()
 
     except Exception as e:
