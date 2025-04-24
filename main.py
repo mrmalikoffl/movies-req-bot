@@ -1,6 +1,14 @@
 import os
 import logging
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, InlineQueryHandler, CallbackQueryHandler, ConversationHandler
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+    InlineQueryHandler,
+    CallbackQueryHandler,
+    ConversationHandler
+)
 from handlers import (
     start, index, handle_forwarded_message, set_thumbnail, handle_thumbnail,
     set_prefix, handle_prefix, set_caption, handle_caption,
@@ -32,7 +40,7 @@ if not all([TELEGRAM_BOT_TOKEN, MONGO_URI]):
 # Conversation states
 SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
 
-def main():
+async def main():
     try:
         # Initialize database
         logger.info("Initializing MongoDB database")
@@ -40,8 +48,7 @@ def main():
 
         # Set up bot
         logger.info("Starting Telegram bot")
-        updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-        dp = updater.dispatcher
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
         # Conversation handler for settings
         conv_handler = ConversationHandler(
@@ -51,31 +58,29 @@ def main():
                 CommandHandler("setcaption", set_caption)
             ],
             states={
-                SET_THUMBNAIL: [MessageHandler(Filters.photo | Filters.text, handle_thumbnail)],
-                SET_PREFIX: [MessageHandler(Filters.text & ~Filters.command, handle_prefix)],
-                SET_CAPTION: [MessageHandler(Filters.text & ~Filters.command, handle_caption)]
+                SET_THUMBNAIL: [MessageHandler(Filters.PHOTO | Filters.TEXT, handle_thumbnail)],
+                SET_PREFIX: [MessageHandler(Filters.TEXT & ~Filters.COMMAND, handle_prefix)],
+                SET_CAPTION: [MessageHandler(Filters.TEXT & ~Filters.COMMAND, handle_caption)]
             },
             fallbacks=[]
         )
 
         # Register handlers
-        dp.add_handler(CommandHandler("start", start))
-        dp.add_handler(CommandHandler("index", index))
-        dp.add_handler(CommandHandler("stats", stats))
-        dp.add_handler(MessageHandler(Filters.forwarded, handle_forwarded_message))
-        dp.add_handler(conv_handler)
-        dp.add_handler(CommandHandler("viewthumbnail", view_thumbnail))
-        dp.add_handler(CommandHandler("viewprefix", view_prefix))
-        dp.add_handler(CommandHandler("viewcaption", view_caption))
-        dp.add_handler(InlineQueryHandler(inline_query))
-        dp.add_handler(CallbackQueryHandler(button_callback))
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("index", index))
+        application.add_handler(CommandHandler("stats", stats))
+        application.add_handler(MessageHandler(Filters.FORWARDED, handle_forwarded_message))
+        application.add_handler(conv_handler)
+        application.add_handler(CommandHandler("viewthumbnail", view_thumbnail))
+        application.add_handler(CommandHandler("viewprefix", view_prefix))
+        application.add_handler(CommandHandler("viewcaption", view_caption))
+        application.add_handler(InlineQueryHandler(inline_query))
+        application.add_handler(CallbackQueryHandler(button_callback))
 
         # Start bot
         logger.info("Bot started polling")
-        updater.start_polling()
+        await application.run_polling()
 
-        # Keep bot running until interrupted
-        updater.idle()
         logger.info("Bot stopped")
 
     except Exception as e:
@@ -84,7 +89,8 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        import asyncio
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot shutdown by user")
     except Exception as e:
