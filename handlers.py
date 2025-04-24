@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
 
 async def fix_thumb(thumb):
+    """Process and resize thumbnail image"""
     width = 0
     height = 0
     try:
@@ -53,20 +54,23 @@ async def fix_thumb(thumb):
                     width = metadata.get("width")
                 if metadata.has("height"):
                     height = metadata.get("height")
-                Image.open(thumb).convert("RGB").save(thumb)
-                img = Image.open(thumb)
-                # Resize while maintaining aspect ratio
-                new_width = 320
-                aspect_ratio = height / width
-                new_height = int(new_width * aspect_ratio)
-                img.resize((new_width, new_height))
-                img.save(thumb, "JPEG")
+                
+                # Convert and resize image
+                with Image.open(thumb) as img:
+                    img = img.convert("RGB")
+                    # Resize while maintaining aspect ratio
+                    new_width = 320
+                    aspect_ratio = height / width
+                    new_height = int(new_width * aspect_ratio)
+                    img = img.resize((new_width, new_height))
+                    img.save(thumb, "JPEG")
+                return width, height, thumb
     except Exception as e:
         logger.error(f"Error in fix_thumb: {str(e)}")
-        thumb = None
-    return width, height, thumb
+    return width, height, None
 
 async def start(update, context):
+    """Send welcome message when command /start is issued"""
     chat_id = update.message.chat_id
     add_user(chat_id)
     await update.message.reply_text(
@@ -86,6 +90,7 @@ async def start(update, context):
     logger.info(f"User {chat_id} started the bot")
 
 async def index(update, context):
+    """Initiate channel indexing process"""
     chat_id = update.message.chat_id
     await update.message.reply_text(
         "Please forward a message from a channel where I am an admin to index all MKV files.",
@@ -98,6 +103,7 @@ async def index(update, context):
     logger.info(f"User {chat_id} initiated indexing")
 
 async def handle_forwarded_message(update, context):
+    """Process forwarded message for channel indexing"""
     if update.callback_query and update.callback_query.data == 'index_cancel':
         context.user_data['indexing'] = False
         context.user_data['index_channel_id'] = None
@@ -260,7 +266,7 @@ async def handle_forwarded_message(update, context):
                             file_id=file_id,
                             message_id=message_id,
                             language=language,
-                            channel_id=forwarded_channel_id  # Store channel_id
+                            channel_id=forwarded_channel_id
                         )
                         
                         if movie_id:
@@ -336,14 +342,13 @@ async def search_movie(update, context):
         search_terms = query.split()
         year = None
         language = None
-        try:
-            for term in search_terms:
-                if term.isdigit() and len(term) == 4:
-                    year = int(term)
-                    search_terms.remove(term)
-                    break
-        except ValueError:
-            pass
+        
+        # Extract year from query if present
+        for term in search_terms[:]:
+            if term.isdigit() and len(term) == 4:
+                year = int(term)
+                search_terms.remove(term)
+                break
 
         # Check for language keywords
         language_terms = ['tamil', 'english', 'hindi']
@@ -367,11 +372,8 @@ async def search_movie(update, context):
 
         # Prepare the response
         total_results = len(movies)
-        page = 1
-        total_pages = 1  # Simplified pagination (all results in one message for now)
-
         header = (
-            f"Search Query: {query}  TOTAL RESULTS: {total_results}  PAGE: {page}/{total_pages}\n\n"
+            f"Search Query: {query}  TOTAL RESULTS: {total_results}\n\n"
             "🔻 Tap on the file button and then start to download. 🔻\n\n"
         )
 
@@ -379,7 +381,6 @@ async def search_movie(update, context):
         results = []
         for movie_data in movies:
             movie_id, title, movie_year, quality, file_size, file_id, message_id, channel_id = movie_data
-            # Fetch the movie document to get the language
             movie_doc = movies_collection.find_one({"_id": ObjectId(movie_id)})
             movie_language = movie_doc.get('language', '') if movie_doc else ''
             language_str = movie_language if movie_language else (language if language else '')
@@ -418,7 +419,6 @@ async def button_callback(update, context):
 
     try:
         movie_id = data.split("_", 1)[1]
-        # Convert movie_id string to ObjectId
         movie = movies_collection.find_one({"_id": ObjectId(movie_id)})
 
         if not movie:
@@ -429,19 +429,17 @@ async def button_callback(update, context):
 
         # Retrieve user settings
         thumbnail_file_id, prefix, caption = get_user_settings(user_id)
-        logger.info(f"User {user_id} settings for download - thumbnail_file_id: {thumbnail_file_id}, prefix: {prefix}, caption: {caption}")
+        logger.info(f"User {user_id} settings for download - thumbnail: {thumbnail_file_id}, prefix: {prefix}, caption: {caption}")
 
         # Prepare caption
-        language_str = f" {movie['language']}" if movie.get('language') else ''
+        language_str = f" {movie.get('language', '')}"
         year_str = str(movie['year']) if movie['year'] != 0 else ''
-        default_caption = f"{movie['title']} ({year_str}) {language_str} {movie['quality']}"
+        default_caption = f"{movie['title']} ({year_str}){language_str} {movie['quality']}"
         final_caption = caption if caption else default_caption
-        logger.info(f"User {user_id} - Using caption: {final_caption}")
 
         # Prepare filename with prefix
         default_filename = f"{movie['title'].replace(' ', '_')}_{year_str}_{movie['quality']}.mkv"
         final_filename = f"{prefix}{default_filename}" if prefix else default_filename
-        logger.info(f"User {user_id} - Using filename: {final_filename}")
 
         # Process the thumbnail if set
         processed_thumbnail = None
@@ -453,46 +451,34 @@ async def button_callback(update, context):
                 await thumbnail_file.download_to_drive(thumbnail_path)
 
                 # Process the thumbnail
-                width, height, processed_thumbnail = await fix_thumb(thumbnail_path)
+                _, _, processed_thumbnail = await fix_thumb(thumbnail_path)
                 if processed_thumbnail is None:
-                    logger.warning(f"User {user_id} - Thumbnail processing failed, using default thumbnail")
-                else:
-                    logger.info(f"User {user_id} - Thumbnail processed successfully: {processed_thumbnail}")
+                    logger.warning(f"User {user_id} - Thumbnail processing failed")
             except Exception as e:
                 logger.error(f"User {user_id} - Error processing thumbnail: {str(e)}")
-                processed_thumbnail = None
 
-        # Copy the movie file to the bot's chat to avoid re-uploading
-        bot_chat_id = context.bot.id
-        copied_message = await context.bot.copy_message(
-            chat_id=bot_chat_id,
-            from_chat_id=movie.get("channel_id", "-1002559398614"),
-            message_id=movie["message_id"]
-        )
-
-        # Send the file to the user with the custom thumbnail, filename, and caption
-        sent_message = await context.bot.send_document(
-            chat_id=user_id,
-            document=copied_message.document.file_id,
-            filename=final_filename,
-            caption=f"{final_caption}  {movie['file_size']} MKV",
-            thumb=open(processed_thumbnail, "rb") if processed_thumbnail else None,
-            parse_mode=None
-        )
-
-        logger.info(f"User {user_id} downloaded movie: {movie['title']} ({movie['_id']}) with filename: {final_filename}")
-
-        # If the thumbnail couldn't be applied, send it separately
-        if processed_thumbnail and sent_message.document.thumb is None:
-            await query.message.reply_photo(
-                photo=thumbnail_file_id,
-                caption=(
-                    "🖼️ This is your custom thumbnail.\n"
-                    "Due to Telegram limitations, the thumbnail couldn’t be applied to the movie file. "
-                    "Please set this thumbnail when uploading the movie to a channel."
-                )
+        # Send the file to the user
+        try:
+            sent_message = await context.bot.send_document(
+                chat_id=user_id,
+                document=movie['file_id'],
+                filename=final_filename,
+                caption=f"{final_caption}  {movie['file_size']} MKV",
+                thumb=open(processed_thumbnail, "rb") if processed_thumbnail else None,
+                parse_mode=None
             )
-            logger.info(f"User {user_id} - Sent custom thumbnail separately: {thumbnail_file_id}")
+            logger.info(f"User {user_id} downloaded movie: {movie['title']}")
+
+            # If thumbnail couldn't be applied, send it separately
+            if processed_thumbnail and not sent_message.document.thumb:
+                await query.message.reply_photo(
+                    photo=thumbnail_file_id,
+                    caption="Your custom thumbnail (couldn't be applied to the file)"
+                )
+        except Exception as e:
+            logger.error(f"Error sending movie to user {user_id}: {str(e)}")
+            await query.message.reply_text("Error sending file. Please try again.")
+            raise
 
         # Clean up
         if processed_thumbnail and os.path.exists(processed_thumbnail):
@@ -510,84 +496,122 @@ async def button_callback(update, context):
         await query.answer(text="Download error.")
 
 async def set_thumbnail(update, context):
-    await update.message.reply_text("Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:")
+    """Initiate thumbnail setting process"""
+    await update.message.reply_text(
+        "Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton('Cancel', callback_data='cancel_thumbnail')]]
+        )
+    )
     logger.info(f"User {update.message.chat_id} initiated /setthumbnail")
     return SET_THUMBNAIL
 
 async def handle_thumbnail(update, context):
+    """Process thumbnail setting"""
     chat_id = update.message.chat_id
+    
+    if update.callback_query and update.callback_query.data == 'cancel_thumbnail':
+        await update.callback_query.message.edit_text("Thumbnail setting cancelled.")
+        logger.info(f"User {chat_id} cancelled thumbnail setting")
+        return ConversationHandler.END
+        
     if update.message.text and update.message.text.lower() == 'default':
         update_user_settings(chat_id, thumbnail_file_id=None)
         await update.message.reply_text("✅ Custom thumbnail set to default successfully!")
         logger.info(f"User {chat_id} set thumbnail to default")
         return ConversationHandler.END
+        
     elif update.message.photo:
         thumbnail_file_id = update.message.photo[-1].file_id
         update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
-        # Verify the setting was saved
-        settings = get_user_settings(chat_id)
-        logger.info(f"User {chat_id} - After setting thumbnail, retrieved settings: {settings}")
         await update.message.reply_text("✅ Custom thumbnail set successfully!")
         logger.info(f"User {chat_id} set thumbnail: {thumbnail_file_id}")
         return ConversationHandler.END
+        
     else:
         await update.message.reply_text("Invalid input. Please upload an image or type 'default'.")
         logger.warning(f"Invalid thumbnail input from user {chat_id}")
         return SET_THUMBNAIL
 
 async def set_prefix(update, context):
-    await update.message.reply_text("Please enter your custom filename prefix (e.g., MyCollection_):")
+    """Initiate prefix setting process"""
+    await update.message.reply_text(
+        "Please enter your custom filename prefix (e.g., MyCollection_):",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton('Cancel', callback_data='cancel_prefix')]]
+        )
+    )
     logger.info(f"User {update.message.chat_id} initiated /setprefix")
     return SET_PREFIX
 
 async def handle_prefix(update, context):
+    """Process prefix setting"""
     chat_id = update.message.chat_id
+    
+    if update.callback_query and update.callback_query.data == 'cancel_prefix':
+        await update.callback_query.message.edit_text("Prefix setting cancelled.")
+        logger.info(f"User {chat_id} cancelled prefix setting")
+        return ConversationHandler.END
+        
     prefix = update.message.text.strip()
     if not prefix.endswith('_'):
         prefix += '_'
 
     update_user_settings(chat_id, prefix=prefix)
-    # Verify the setting was saved
-    settings = get_user_settings(chat_id)
-    logger.info(f"User {chat_id} - After setting prefix, retrieved settings: {settings}")
     await update.message.reply_text(f"✅ Custom prefix set to: {prefix}")
     logger.info(f"User {chat_id} set prefix: {prefix}")
     return ConversationHandler.END
 
 async def set_caption(update, context):
-    await update.message.reply_text("Please enter your custom caption (e.g., My favorite movie!):")
+    """Initiate caption setting process"""
+    await update.message.reply_text(
+        "Please enter your custom caption (e.g., My favorite movie!):",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton('Cancel', callback_data='cancel_caption')]]
+        )
+    )
     logger.info(f"User {update.message.chat_id} initiated /setcaption")
     return SET_CAPTION
 
 async def handle_caption(update, context):
+    """Process caption setting"""
     chat_id = update.message.chat_id
+    
+    if update.callback_query and update.callback_query.data == 'cancel_caption':
+        await update.callback_query.message.edit_text("Caption setting cancelled.")
+        logger.info(f"User {chat_id} cancelled caption setting")
+        return ConversationHandler.END
+        
     caption = update.message.text.strip()
-
     update_user_settings(chat_id, caption=caption)
-    # Verify the setting was saved
-    settings = get_user_settings(chat_id)
-    logger.info(f"User {chat_id} - After setting caption, retrieved settings: {settings}")
     await update.message.reply_text(f"✅ Custom caption set to: {caption}")
     logger.info(f"User {chat_id} set caption: {caption}")
     return ConversationHandler.END
 
 async def view_thumbnail(update, context):
+    """Show current thumbnail setting"""
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
     thumbnail_file_id = settings[0]
-    logger.info(f"User {chat_id} viewed thumbnail - raw value: {thumbnail_file_id}")
+    
     if thumbnail_file_id:
-        await update.message.reply_photo(photo=thumbnail_file_id, caption="Your current thumbnail")
+        await update.message.reply_photo(
+            photo=thumbnail_file_id,
+            caption="Your current thumbnail"
+        )
         logger.info(f"User {chat_id} viewed thumbnail")
     else:
-        await update.message.reply_text("Your thumbnail is set to default (Telegram's default thumbnail will be used).")
+        await update.message.reply_text(
+            "Your thumbnail is set to default (Telegram's default thumbnail will be used)."
+        )
         logger.info(f"User {chat_id} has default thumbnail")
 
 async def view_prefix(update, context):
+    """Show current prefix setting"""
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
     prefix = settings[1]
-    logger.info(f"User {chat_id} viewed prefix - raw value: {prefix}")
+    
     if prefix:
         await update.message.reply_text(f"Your prefix: {prefix}")
         logger.info(f"User {chat_id} viewed prefix: {prefix}")
@@ -596,18 +620,22 @@ async def view_prefix(update, context):
         logger.info(f"User {chat_id} has no prefix set")
 
 async def view_caption(update, context):
+    """Show current caption setting"""
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
     caption = settings[2]
-    logger.info(f"User {chat_id} viewed caption - raw value: {caption}")
+    
     if caption:
         await update.message.reply_text(f"Your caption: {caption}")
         logger.info(f"User {chat_id} viewed caption: {caption}")
     else:
-        await update.message.reply_text("No custom caption set. Default caption will be used.")
+        await update.message.reply_text(
+            "No custom caption set. Default caption will be used."
+        )
         logger.info(f"User {chat_id} has default caption")
 
 async def stats(update, context):
+    """Show bot statistics"""
     chat_id = update.message.chat_id
     try:
         total_users = users_collection.count_documents({})
@@ -629,3 +657,8 @@ async def stats(update, context):
     except Exception as e:
         await update.message.reply_text("Error retrieving stats. Please try again later.")
         logger.error(f"Error retrieving stats for user {chat_id}: {str(e)}")
+
+async def cancel(update, context):
+    """Cancel any ongoing conversation"""
+    await update.message.reply_text('Operation cancelled.')
+    return ConversationHandler.END
