@@ -6,7 +6,7 @@ from telegram.ext import ConversationHandler
 from database import add_user, update_user_settings, get_user_settings, add_movie
 from pymongo import MongoClient
 from dotenv import load_dotenv
-from telethon.sync import TelegramClient
+from telethon import TelegramClient
 from telethon.tl.functions.messages import GetHistoryRequest
 
 # Load environment variables
@@ -111,7 +111,7 @@ async def handle_forwarded_message(update, context):
             # Debug logging for environment variables
             logger.info(f"TELEGRAM_API_ID: {api_id}")
             logger.info(f"TELEGRAM_API_HASH: {api_hash}")
-            logger.info(f"TELEGRAM_BOT_TOKEN: {bot_token[:10]}...")  # Partial token for security
+            logger.info(f"TELEGRAM_BOT_TOKEN: {bot_token[:10]}...")
 
             if not all([api_id, api_hash, bot_token]):
                 missing = [var for var, val in [
@@ -124,17 +124,18 @@ async def handle_forwarded_message(update, context):
                 logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
                 return
 
-            # Use a unique session name to avoid corrupted session files
-            async with TelegramClient('bot_session_2025', int(api_id), api_hash) as client:
-                try:
-                    await client.start(bot_token=bot_token)
-                    logger.info(f"TelegramClient authenticated successfully for channel {forwarded_channel_id}")
-                except Exception as auth_error:
-                    error_msg = f"Failed to authenticate TelegramClient: {str(auth_error)}"
-                    await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
-                    logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
-                    return
+            # Use sync client to avoid async issues
+            client = TelegramClient('bot_session_2025', int(api_id), api_hash)
+            try:
+                client.start(bot_token=bot_token)
+                logger.info(f"TelegramClient authenticated successfully for channel {forwarded_channel_id}")
+            except Exception as auth_error:
+                error_msg = f"Failed to authenticate TelegramClient: {str(auth_error)}"
+                await update.message.reply_text("Authentication error with Telegram. Please contact the administrator.")
+                logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
+                return
 
+            with client:
                 total_files = 0
                 duplicate = 0
                 errors = 0
@@ -142,7 +143,7 @@ async def handle_forwarded_message(update, context):
                 current = 0
                 max_messages = 1000
 
-                async for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
+                for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
                     current += 1
                     if current % 20 == 0:
                         await update.message.reply_text(
@@ -169,7 +170,6 @@ async def handle_forwarded_message(update, context):
                         language = 'tamil'
                     elif 'english' in file_name.lower():
                         language = 'english'
-                    # Add more language detection as needed
 
                     # Fetch Telegram file ID
                     try:
