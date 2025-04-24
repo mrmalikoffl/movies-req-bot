@@ -4,7 +4,7 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters,  # Changed from Filters
+    filters,
     InlineQueryHandler,
     CallbackQueryHandler,
     ConversationHandler
@@ -17,6 +17,7 @@ from handlers import (
 from inline import inline_query, button_callback
 from database import init_db
 from dotenv import load_dotenv
+import asyncio
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -79,20 +80,35 @@ async def main():
 
         # Start bot
         logger.info("Bot started polling")
-        await application.run_polling()
+        await application.initialize()  # Explicitly initialize the application
+        await application.start()       # Start the application
+        await application.updater.start_polling()  # Start polling
+        logger.info("Bot is polling...")
 
-        logger.info("Bot stopped")
+        # Keep the bot running until stopped
+        await asyncio.Event().wait()  # Prevent the function from exiting
 
     except Exception as e:
         logger.error(f"Fatal error in main: {str(e)}")
         raise
+    finally:
+        logger.info("Shutting down bot")
+        await application.updater.stop()  # Stop polling
+        await application.stop()         # Stop the application
+        await application.shutdown()      # Clean up resources
 
 if __name__ == '__main__':
     try:
-        import asyncio
-        asyncio.run(main())
+        # Get or create the event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot shutdown by user")
     except Exception as e:
         logger.error(f"Startup error: {str(e)}")
         raise
+    finally:
+        loop.close()
