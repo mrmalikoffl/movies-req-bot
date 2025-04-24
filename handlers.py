@@ -16,7 +16,7 @@ from telethon.errors import (
     ChannelPrivateError,
     AuthKeyError
 )
-from bson.objectid import ObjectId  # Added for ObjectId conversion
+from bson.objectid import ObjectId
 
 # Load environment variables
 load_dotenv()
@@ -216,7 +216,7 @@ async def handle_forwarded_message(update, context):
                         year = int(clean_name[1]) if len(clean_name) > 1 and clean_name[1].isdigit() else 0
                         quality = clean_name[2] if len(clean_name) > 2 else 'Unknown'
                         
-                        # Format file size 
+                        # Format file size
                         size_bytes = msg.document.size
                         if size_bytes >= 1024 * 1024 * 1024:
                             file_size = f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
@@ -441,6 +441,11 @@ async def button_callback(update, context):
         logger.error(f"Error in download for {movie_id} by user {user_id}: {str(e)}")
         await query.answer(text="Download error.")
 
+async def set_thumbnail(update, context):
+    await update.message.reply_text("Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:")
+    logger.info(f"User {update.message.chat_id} initiated /setthumbnail")
+    return SET_THUMBNAIL
+
 async def handle_thumbnail(update, context):
     chat_id = update.message.chat_id
     if update.message.text and update.message.text.lower() == 'default':
@@ -462,6 +467,11 @@ async def handle_thumbnail(update, context):
         logger.warning(f"Invalid thumbnail input from user {chat_id}")
         return SET_THUMBNAIL
 
+async def set_prefix(update, context):
+    await update.message.reply_text("Please enter your custom filename prefix (e.g., MyCollection_):")
+    logger.info(f"User {update.message.chat_id} initiated /setprefix")
+    return SET_PREFIX
+
 async def handle_prefix(update, context):
     chat_id = update.message.chat_id
     prefix = update.message.text.strip()
@@ -475,6 +485,11 @@ async def handle_prefix(update, context):
     await update.message.reply_text(f"✅ Custom prefix set to: {prefix}")
     logger.info(f"User {chat_id} set prefix: {prefix}")
     return ConversationHandler.END
+
+async def set_caption(update, context):
+    await update.message.reply_text("Please enter your custom caption (e.g., My favorite movie!):")
+    logger.info(f"User {update.message.chat_id} initiated /setcaption")
+    return SET_CAPTION
 
 async def handle_caption(update, context):
     chat_id = update.message.chat_id
@@ -491,19 +506,23 @@ async def handle_caption(update, context):
 async def view_thumbnail(update, context):
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
-    if settings and settings[0]:
-        await update.message.reply_photo(photo=settings[0], caption="Your current thumbnail")
+    thumbnail_file_id = settings[0]
+    logger.info(f"User {chat_id} viewed thumbnail - raw value: {thumbnail_file_id}")
+    if thumbnail_file_id:
+        await update.message.reply_photo(photo=thumbnail_file_id, caption="Your current thumbnail")
         logger.info(f"User {chat_id} viewed thumbnail")
     else:
-        await update.message.reply_text("Your thumbnail is set to default (blue square).")
+        await update.message.reply_text("Your thumbnail is set to default (Telegram's default thumbnail will be used).")
         logger.info(f"User {chat_id} has default thumbnail")
 
 async def view_prefix(update, context):
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
-    if settings and settings[1]:
-        await update.message.reply_text(f"Your prefix: {settings[1]}")
-        logger.info(f"User {chat_id} viewed prefix: {settings[1]}")
+    prefix = settings[1]
+    logger.info(f"User {chat_id} viewed prefix - raw value: {prefix}")
+    if prefix:
+        await update.message.reply_text(f"Your prefix: {prefix}")
+        logger.info(f"User {chat_id} viewed prefix: {prefix}")
     else:
         await update.message.reply_text("No prefix set.")
         logger.info(f"User {chat_id} has no prefix set")
@@ -511,11 +530,13 @@ async def view_prefix(update, context):
 async def view_caption(update, context):
     chat_id = update.message.chat_id
     settings = get_user_settings(chat_id)
-    if settings and settings[2]:
-        await update.message.reply_text(f"Your caption: {settings[2]}")
-        logger.info(f"User {chat_id} viewed caption: {settings[2]}")
+    caption = settings[2]
+    logger.info(f"User {chat_id} viewed caption - raw value: {caption}")
+    if caption:
+        await update.message.reply_text(f"Your caption: {caption}")
+        logger.info(f"User {chat_id} viewed caption: {caption}")
     else:
-        await update.message.reply_text("Your caption is set to default: 'Enjoy the movie!'")
+        await update.message.reply_text("No custom caption set. Default caption will be used.")
         logger.info(f"User {chat_id} has default caption")
 
 async def stats(update, context):
