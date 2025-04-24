@@ -2,6 +2,18 @@ import os
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import add_user, update_user_settings, get_user_settings, add_movie
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# MongoDB connection for stats
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI)
+db = client["movie_bot"]
+movies_collection = db["movies"]
+users_collection = db["users"]
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -172,3 +184,33 @@ def view_caption(update, context):
     else:
         update.message.reply_text("Your caption is set to default: 'Enjoy the movie!'")
         logger.info(f"User {chat_id} has default caption")
+
+def stats(update, context):
+    """Display bot statistics: total users, total files, bot language, and owner name."""
+    chat_id = update.message.chat_id
+    try:
+        # Count users and movies
+        total_users = users_collection.count_documents({})
+        total_files = movies_collection.count_documents({})
+
+        # Bot language (hardcoded or configurable)
+        bot_language = os.getenv("BOT_LANGUAGE", "English")
+
+        # Owner name (from environment variable or hardcoded)
+        owner_name = os.getenv("OWNER_NAME", "MovieBot Team")
+
+        # Format stats message
+        stats_message = (
+            "📊 *Movie Bot Statistics* 📊\n\n"
+            f"👥 *Total Users*: {total_users}\n"
+            f"🎥 *Total Movies*: {total_files}\n"
+            f"🌐 *Bot Language*: {bot_language}\n"
+            f"👤 *Owner*: {owner_name}\n\n"
+            "Thanks for using the Movie Bot! 🎉"
+        )
+
+        update.message.reply_text(stats_message, parse_mode='Markdown')
+        logger.info(f"User {chat_id} viewed bot stats: {total_users} users, {total_files} movies")
+    except Exception as e:
+        update.message.reply_text("Error retrieving stats. Please try again later.")
+        logger.error(f"Error retrieving stats for user {chat_id}: {str(e)}")
