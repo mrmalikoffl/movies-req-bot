@@ -4,7 +4,7 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    Filters,
+    filters,  # Changed from Filters
     InlineQueryHandler,
     CallbackQueryHandler,
     ConversationHandler
@@ -58,9 +58,9 @@ async def main():
                 CommandHandler("setcaption", set_caption)
             ],
             states={
-                SET_THUMBNAIL: [MessageHandler(Filters.PHOTO | Filters.TEXT, handle_thumbnail)],
-                SET_PREFIX: [MessageHandler(Filters.TEXT & ~Filters.COMMAND, handle_prefix)],
-                SET_CAPTION: [MessageHandler(Filters.TEXT & ~Filters.COMMAND, handle_caption)]
+                SET_THUMBNAIL: [MessageHandler(filters.PHOTO | filters.TEXT, handle_thumbnail)],
+                SET_PREFIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prefix)],
+                SET_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_caption)]
             },
             fallbacks=[]
         )
@@ -69,7 +69,7 @@ async def main():
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("index", index))
         application.add_handler(CommandHandler("stats", stats))
-        application.add_handler(MessageHandler(Filters.FORWARDED, handle_forwarded_message))
+        application.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded_message))
         application.add_handler(conv_handler)
         application.add_handler(CommandHandler("viewthumbnail", view_thumbnail))
         application.add_handler(CommandHandler("viewprefix", view_prefix))
