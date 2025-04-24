@@ -192,7 +192,8 @@ async def handle_forwarded_message(update, context):
                         year = int(parts[1]) if len(parts) > 1 else 0
                         quality = parts[2] if len(parts) > 2 else 'Unknown'
                         file_size = f"{msg.document.size / (1024 * 1024):.2f}MB"
-                        if add_movie(title, year, quality, file_size, file_id, message_id, language=language):
+                        movie_id = add_movie(title, year, quality, file_size, file_id, message_id, language=language)
+                        if movie_id:
                             logger.info(f"Indexed movie: {title} ({year}, {quality}, {language}) from channel {forwarded_channel_id}")
                             total_files += 1
                         else:
@@ -259,21 +260,25 @@ async def search_movie(update, context):
         movie_name = " ".join(search_terms)
         movies = search_movies(movie_name, year=year, language=language)
 
+        # Fallback: If no results with year, try without year
+        if not movies and year:
+            movies = search_movies(movie_name, language=language)
+            logger.info(f"No results for '{query}' with year={year}, falling back to no year")
+
         if not movies:
             await update.message.reply_text("No movies found. Try another search.")
-            logger.info(f"No movies found for query: '{query}' by user {chat_id}")
+            logger.info(f"No movies found for query: name={movie_name}, year={year}, language={language}")
             return
 
-        for title, movie_year, quality, file_size, file_id, message_id in movies:
-            result_id = f"{file_id}_{message_id}_{movie_year}"
+        for movie_id, title, movie_year, quality, file_size, file_id, message_id in movies:
             caption = f"{title} ({movie_year}, {quality}, {file_size})"
             await update.message.reply_text(
                 caption,
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("Download", callback_data=f"download_{result_id}")
+                    InlineKeyboardButton("Download", callback_data=f"download_{movie_id}")
                 ]])
             )
-        logger.info(f"Found {len(movies)} movies for query: '{query}' by user {chat_id}")
+        logger.info(f"Found {len(movies)} movies for query: name={movie_name}, year={year}, language={language}")
 
     except TelegramError as te:
         await update.message.reply_text("Error occurred. Please try again later.")
@@ -293,13 +298,12 @@ async def button_callback(update, context):
         return
 
     try:
-        result_id = data.split("_", 1)[1]
-        file_id, message_id, movie_year = result_id.split("_")
-        movie = movies_collection.find_one({"file_id": file_id, "message_id": int(message_id)})
+        movie_id = data.split("_", 1)[1]
+        movie = movies_collection.find_one({"_id": movie_id})
 
         if not movie:
             await query.message.reply_text("Movie not found. It may have been deleted.")
-            logger.warning(f"Movie not found for download: {result_id} by user {user_id}")
+            logger.warning(f"Movie not found for download: {movie_id} by user {user_id}")
             await query.answer()
             return
 
@@ -317,12 +321,12 @@ async def button_callback(update, context):
         await query.answer(text="Download started!")
 
     except TelegramError as te:
-        await update.message.reply_text("Error sending movie. Please try again later.")
-        logger.error(f"Telegram error in download for {result_id} by user {user_id}: {str(te)}")
+        await query.message.reply_text("Error sending movie. Please try again later.")
+        logger.error(f"Telegram error in download for {movie_id} by user {user_id}: {str(te)}")
         await query.answer(text="Download error.")
     except Exception as e:
-        await update.message.reply_text("An error occurred. Please try again later.")
-        logger.error(f"Error in download for {result_id} by user {user_id}: {str(e)}")
+        await query.message.reply_text("An error occurred. Please try again later.")
+        logger.error(f"Error in download for {movie_id} by user {user_id}: {str(e)}")
         await query.answer(text="Download error.")
 
 async def set_thumbnail(update, context):
