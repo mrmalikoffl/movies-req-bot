@@ -398,19 +398,37 @@ async def button_callback(update, context):
             await query.answer()
             return
 
+        # Retrieve user settings
         thumbnail_file_id, prefix, caption = get_user_settings(user_id)
+        logger.info(f"User {user_id} settings for download - thumbnail_file_id: {thumbnail_file_id}, prefix: {prefix}, caption: {caption}")
+
+        # Prepare caption
         language_str = f" {movie['language']}" if movie.get('language') else ''
         year_str = str(movie['year']) if movie['year'] != 0 else ''
         default_caption = f"{movie['title']} ({year_str}) {language_str} {movie['quality']}"
-        final_caption = caption or default_caption
+        final_caption = caption if caption else default_caption
+        logger.info(f"User {user_id} - Using caption: {final_caption}")
 
+        # Prepare filename with prefix
+        default_filename = f"{movie['title'].replace(' ', '_')}_{year_str}_{movie['quality']}.mkv"
+        final_filename = f"{prefix}{default_filename}" if prefix else default_filename
+        logger.info(f"User {user_id} - Using filename: {final_filename}")
+
+        # Log thumbnail usage
+        if thumbnail_file_id:
+            logger.info(f"User {user_id} - Using custom thumbnail: {thumbnail_file_id}")
+        else:
+            logger.info(f"User {user_id} - No custom thumbnail set, using Telegram default")
+
+        # Send the document with custom thumbnail, filename, and caption
         await query.message.reply_document(
             document=movie["file_id"],
+            filename=final_filename,
             caption=f"{final_caption}  {movie['file_size']} MKV",
-            thumb=thumbnail_file_id,
+            thumb=thumbnail_file_id if thumbnail_file_id else None,
             parse_mode=None
         )
-        logger.info(f"User {user_id} downloaded movie: {movie['title']} ({movie['_id']})")
+        logger.info(f"User {user_id} downloaded movie: {movie['title']} ({movie['_id']}) with filename: {final_filename}")
 
         await query.answer(text="Download started!")
 
@@ -423,22 +441,19 @@ async def button_callback(update, context):
         logger.error(f"Error in download for {movie_id} by user {user_id}: {str(e)}")
         await query.answer(text="Download error.")
 
-async def set_thumbnail(update, context):
-    await update.message.reply_text("Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:")
-    logger.info(f"User {update.message.chat_id} initiated /setthumbnail")
-    return SET_THUMBNAIL
-
 async def handle_thumbnail(update, context):
     chat_id = update.message.chat_id
     if update.message.text and update.message.text.lower() == 'default':
-        thumbnail_file_id = None
-        update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
+        update_user_settings(chat_id, thumbnail_file_id=None)
         await update.message.reply_text("✅ Custom thumbnail set to default successfully!")
         logger.info(f"User {chat_id} set thumbnail to default")
         return ConversationHandler.END
     elif update.message.photo:
         thumbnail_file_id = update.message.photo[-1].file_id
         update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
+        # Verify the setting was saved
+        settings = get_user_settings(chat_id)
+        logger.info(f"User {chat_id} - After setting thumbnail, retrieved settings: {settings}")
         await update.message.reply_text("✅ Custom thumbnail set successfully!")
         logger.info(f"User {chat_id} set thumbnail: {thumbnail_file_id}")
         return ConversationHandler.END
@@ -447,11 +462,6 @@ async def handle_thumbnail(update, context):
         logger.warning(f"Invalid thumbnail input from user {chat_id}")
         return SET_THUMBNAIL
 
-async def set_prefix(update, context):
-    await update.message.reply_text("Please enter your custom filename prefix (e.g., MyCollection_):")
-    logger.info(f"User {update.message.chat_id} initiated /setprefix")
-    return SET_PREFIX
-
 async def handle_prefix(update, context):
     chat_id = update.message.chat_id
     prefix = update.message.text.strip()
@@ -459,20 +469,21 @@ async def handle_prefix(update, context):
         prefix += '_'
 
     update_user_settings(chat_id, prefix=prefix)
+    # Verify the setting was saved
+    settings = get_user_settings(chat_id)
+    logger.info(f"User {chat_id} - After setting prefix, retrieved settings: {settings}")
     await update.message.reply_text(f"✅ Custom prefix set to: {prefix}")
     logger.info(f"User {chat_id} set prefix: {prefix}")
     return ConversationHandler.END
-
-async def set_caption(update, context):
-    await update.message.reply_text("Please enter your custom caption (e.g., My favorite movie!):")
-    logger.info(f"User {update.message.chat_id} initiated /setcaption")
-    return SET_CAPTION
 
 async def handle_caption(update, context):
     chat_id = update.message.chat_id
     caption = update.message.text.strip()
 
     update_user_settings(chat_id, caption=caption)
+    # Verify the setting was saved
+    settings = get_user_settings(chat_id)
+    logger.info(f"User {chat_id} - After setting caption, retrieved settings: {settings}")
     await update.message.reply_text(f"✅ Custom caption set to: {caption}")
     logger.info(f"User {chat_id} set caption: {caption}")
     return ConversationHandler.END
