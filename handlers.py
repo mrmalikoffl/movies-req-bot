@@ -2,6 +2,7 @@ import os
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
+from telegram.ext import ConversationHandler
 from database import add_user, update_user_settings, get_user_settings, add_movie
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -19,6 +20,9 @@ users_collection = db["users"]
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Conversation states (must match main.py)
+SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
 
 def start(update, context):
     chat_id = update.message.chat_id
@@ -43,7 +47,7 @@ def index(update, context):
     chat_id = update.message.chat_id
     update.message.reply_text("Please forward a message from a channel where I am an admin to start indexing.")
     context.user_data['indexing'] = True
-    context.user_data['index_channel_id'] = None  # Clear any previous channel ID
+    context.user_data['index_channel_id'] = None
     logger.info(f"User {chat_id} initiated indexing")
 
 def handle_forwarded_message(update, context):
@@ -59,7 +63,6 @@ def handle_forwarded_message(update, context):
 
     forwarded_channel_id = f"-100{message.forward_from_chat.id}"
     try:
-        # Check if bot is an admin of the forwarded channel
         admins = context.bot.get_chat_administrators(forwarded_channel_id)
         bot_id = context.bot.id
         if not any(admin.user.id == bot_id for admin in admins):
@@ -67,17 +70,14 @@ def handle_forwarded_message(update, context):
             logger.warning(f"Bot is not admin of channel {forwarded_channel_id} for user {chat_id}")
             return
 
-        # Check if user is an admin of the channel
         if not any(admin.user.id == chat_id for admin in admins):
             update.message.reply_text("Only channel admins can index movies.")
             logger.warning(f"User {chat_id} is not admin of channel {forwarded_channel_id}")
             return
 
-        # Store the channel ID for indexing
         context.user_data['index_channel_id'] = forwarded_channel_id
         logger.info(f"User {chat_id} set indexing channel to {forwarded_channel_id}")
 
-        # Index messages from the channel
         try:
             messages = []
             offset = 0
@@ -103,7 +103,7 @@ def handle_forwarded_message(update, context):
                     except (IndexError, ValueError) as e:
                         logger.warning(f"Skipped invalid file name: {file_name} in channel {forwarded_channel_id} - {str(e)}")
                         continue
-            update.message.reply_text(f"Indexing complete for channel {forwarded_channel_id}.")
+            update.message.reply_text(f"Indexing complete for channel {forwarded_channel_id}. ✅")
             logger.info(f"Indexing completed for channel {forwarded_channel_id}")
         except TelegramError as e:
             update.message.reply_text(f"Error indexing channel: {str(e)}")
@@ -118,28 +118,31 @@ def handle_forwarded_message(update, context):
 def set_thumbnail(update, context):
     update.message.reply_text("Please upload an image for your custom thumbnail or type 'default' for a default thumbnail:")
     logger.info(f"User {update.message.chat_id} initiated /setthumbnail")
-    return "SET_THUMBNAIL"
+    return SET_THUMBNAIL
 
 def handle_thumbnail(update, context):
     chat_id = update.message.chat_id
     if update.message.text and update.message.text.lower() == 'default':
         thumbnail_file_id = None
+        update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
+        update.message.reply_text("✅ Custom thumbnail set to default successfully!")
+        logger.info(f"User {chat_id} set thumbnail to default")
+        return ConversationHandler.END
     elif update.message.photo:
         thumbnail_file_id = update.message.photo[-1].file_id
+        update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
+        update.message.reply_text("✅ Custom thumbnail set successfully!")
+        logger.info(f"User {chat_id} set thumbnail: {thumbnail_file_id}")
+        return ConversationHandler.END
     else:
         update.message.reply_text("Invalid input. Please upload an image or type 'default'.")
         logger.warning(f"Invalid thumbnail input from user {chat_id}")
-        return "SET_THUMBNAIL"
-
-    update_user_settings(chat_id, thumbnail_file_id=thumbnail_file_id)
-    update.message.reply_text("Thumbnail set successfully!")
-    logger.info(f"User {chat_id} set thumbnail: {thumbnail_file_id}")
-    return None
+        return SET_THUMBNAIL
 
 def set_prefix(update, context):
     update.message.reply_text("Please enter your custom filename prefix (e.g., MyCollection_):")
     logger.info(f"User {update.message.chat_id} initiated /setprefix")
-    return "SET_PREFIX"
+    return SET_PREFIX
 
 def handle_prefix(update, context):
     chat_id = update.message.chat_id
@@ -148,23 +151,23 @@ def handle_prefix(update, context):
         prefix += '_'
 
     update_user_settings(chat_id, prefix=prefix)
-    update.message.reply_text(f"Prefix set to: {prefix}")
+    update.message.reply_text(f"✅ Custom prefix set to: {prefix}")
     logger.info(f"User {chat_id} set prefix: {prefix}")
-    return None
+    return ConversationHandler.END
 
 def set_caption(update, context):
     update.message.reply_text("Please enter your custom caption (e.g., My favorite movie!):")
     logger.info(f"User {update.message.chat_id} initiated /setcaption")
-    return "SET_CAPTION"
+    return SET_CAPTION
 
 def handle_caption(update, context):
     chat_id = update.message.chat_id
     caption = update.message.text.strip()
 
     update_user_settings(chat_id, caption=caption)
-    update.message.reply_text(f"Caption set to: {caption}")
+    update.message.reply_text(f"✅ Custom caption set to: {caption}")
     logger.info(f"User {chat_id} set caption: {caption}")
-    return None
+    return ConversationHandler.END
 
 def view_thumbnail(update, context):
     chat_id = update.message.chat_id
@@ -206,12 +209,12 @@ def stats(update, context):
         owner_name = os.getenv("OWNER_NAME", "MovieBot Team")
 
         stats_message = (
-            "📊 *Movie Bot Statistics* 📊\n\n"
+            "📊 *Ms Film Factory Statistics* 📊\n\n"
             f"👥 *Total Users*: {total_users}\n"
             f"🎥 *Total Movies*: {total_files}\n"
             f"🌐 *Bot Language*: {bot_language}\n"
             f"👤 *Owner*: {owner_name}\n\n"
-            "Thanks for using the Movie Bot! 🎉"
+            "Thanks for using the Ms Film Factory! 🎉"
         )
 
         update.message.reply_text(stats_message, parse_mode='Markdown')
