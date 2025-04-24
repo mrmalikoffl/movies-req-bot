@@ -232,7 +232,7 @@ async def stats(update, context):
     try:
         total_users = users_collection.count_documents({})
         total_files = movies_collection.count_documents({})
-        bot_language = os.getenv("BOT_LANGUAGE", "English")
+        bot_language = os.getenv("BONGO_URI", "English")
         owner_name = os.getenv("OWNER_NAME", "MovieBot Team")
 
         stats_message = (
