@@ -61,7 +61,7 @@ async def index(update, context):
     context.user_data['index_mode'] = None
     logger.info(f"User {chat_id} initiated indexing")
 
-async def batch_index(client, channel_id, progress_msg, context, batch_size=100, max_messages=1000):
+async def batch_index(client, channel_id, progress_msg, context, chat_id, batch_size=100, max_messages=1000):
     """Process channel messages in batches to index MKV files"""
     total_files = 0
     duplicate = 0
@@ -109,10 +109,19 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
                     language = 'hindi'
 
                 try:
-                    # Use Telethon to get file_id (access_hash and id)
-                    file_id = f"{msg.document.id}:{msg.document.access_hash}"
-                except Exception as e:
-                    logger.error(f"Error getting file ID for {file_name}: {str(e)}")
+                    forwarded = await context.bot.forward_message(
+                        chat_id=chat_id,  # Forward to user
+                        from_chat_id=channel_id,
+                        message_id=message_id
+                    )
+                    if not forwarded.document:
+                        unsupported += 1
+                        await context.bot.delete_message(chat_id=chat_id, message_id=forwarded.message_id)
+                        continue
+                    file_id = forwarded.document.file_id
+                    await context.bot.delete_message(chat_id=chat_id, message_id=forwarded.message_id)
+                except (TelegramError, BadRequest) as te:
+                    logger.error(f"Error getting file ID for {file_name}: {str(te)}")
                     errors += 1
                     continue
 
@@ -300,7 +309,7 @@ async def handle_forwarded_message(update, context):
 
             if context.user_data['index_mode'] == 'batch':
                 total_files, duplicate, errors, unsupported, current = await batch_index(
-                    client, forwarded_channel_id, progress_msg, context
+                    client, forwarded_channel_id, progress_msg, context, chat_id
                 )
             else:
                 # Single-pass indexing
@@ -341,10 +350,19 @@ async def handle_forwarded_message(update, context):
                             language = 'hindi'
 
                         try:
-                            # Use Telethon to get file_id (access_hash and id)
-                            file_id = f"{msg.document.id}:{msg.document.access_hash}"
-                        except Exception as e:
-                            logger.error(f"Error getting file ID for {file_name}: {str(e)}")
+                            forwarded = await context.bot.forward_message(
+                                chat_id=chat_id,  # Forward to user
+                                from_chat_id=forwarded_channel_id,
+                                message_id=message_id
+                            )
+                            if not forwarded.document:
+                                unsupported += 1
+                                await context.bot.delete_message(chat_id=chat_id, message_id=forwarded.message_id)
+                                continue
+                            file_id = forwarded.document.file_id
+                            await context.bot.delete_message(chat_id=chat_id, message_id=forwarded.message_id)
+                        except (TelegramError, BadRequest) as te:
+                            logger.error(f"Error getting file ID for {file_name}: {str(te)}")
                             errors += 1
                             continue
 
@@ -544,7 +562,6 @@ async def button_callback(update, context):
             await query.answer()
             return
 
-        # TODO: Ensure process_file is defined in utils.py or another module
         success = await process_file(
             bot=context.bot,
             chat_id=user_id,
