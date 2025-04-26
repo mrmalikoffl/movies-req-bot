@@ -139,6 +139,7 @@ async def main():
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=True,  # Ensure CallbackQueryHandler is tracked for every message
     )
     application.add_handler(settings_conv_handler)
 
@@ -157,7 +158,7 @@ async def main():
         logger.info("Bot started polling")
 
         # Start cleanup task
-        asyncio.create_task(cleanup_recent_searches(application))
+        cleanup_task = asyncio.create_task(cleanup_recent_searches(application))
 
         # Start polling with timeout configuration
         await application.updater.start_polling(
@@ -166,14 +167,28 @@ async def main():
             allowed_updates=Update.ALL_TYPES,
         )
 
-        # Keep the bot running
-        await application.updater.wait_for_shutdown()
+        # Keep the bot running until a shutdown signal is received
+        shutdown_event = asyncio.Event()
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown_event.set)
+
+        await shutdown_event.wait()
 
     except Exception as e:
         logger.error(f"Fatal error in main: {str(e)}", exc_info=True)
         raise
     finally:
         try:
+            # Cancel background tasks
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                logger.info("Cleanup task cancelled")
+
+            # Stop and shut down the application
+            await application.updater.stop()
             await application.stop()
             await application.shutdown()
             logger.info("Bot shut down successfully")
@@ -185,7 +200,9 @@ def handle_shutdown(loop, application):
     logger.info("Received shutdown signal, stopping bot...")
     tasks = [task for task in asyncio.all_tasks(loop) if task is not asyncio.current_task()]
     for task in tasks:
+        logger.info(f"Cancelling task: {task}")
         task.cancel()
+    loop.run_until_complete(application.updater.stop())
     loop.run_until_complete(application.stop())
     loop.run_until_complete(application.shutdown())
     loop.run_until_complete(loop.shutdown_asyncgens())
@@ -196,6 +213,7 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
 
     # Set up signal handlers
+    application = None  # Define application to avoid NameError in handle_shutdown
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(
             sig, lambda: handle_shutdown(loop, application)
