@@ -1,9 +1,10 @@
 import os
 import logging
 from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError, PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError, AutoReconnect
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,12 +22,23 @@ except PyMongoError as e:
     logger.error(f"Failed to connect to MongoDB: {str(e)}")
     raise
 
+def check_db_connection():
+    """Check if MongoDB connection is healthy."""
+    try:
+        client.admin.command('ping')
+        logger.info("MongoDB connection is healthy")
+        return True
+    except PyMongoError as e:
+        logger.error(f"MongoDB connection check failed: {str(e)}")
+        return False
+
 def init_db():
     """Initialize database with necessary indexes."""
     try:
         movies_collection.create_index([("file_id", 1), ("message_id", 1)], unique=True)
         movies_collection.create_index([("title", "text")])
         movies_collection.create_index([("year", 1), ("language", 1)])
+        movies_collection.create_index([("channel_id", 1)])
         users_collection.create_index([("chat_id", 1)], unique=True)
         logger.info("Database indexes created successfully")
     except PyMongoError as e:
@@ -107,48 +119,102 @@ def get_user_settings(chat_id):
         logger.error(f"Error retrieving user settings for {chat_id}: {str(e)}")
         raise
 
-def add_movie(title, year, quality, file_size, file_id, message_id, language=None, channel_id=None):
-    """Add a movie to movies_collection if it doesn't exist, return the _id."""
+def add_movie(title, year, quality, file_size, file_id, message_id, language=None, channel_id=None, retries=3):
+    """Add a movie to movies_collection with retries."""
+    attempt = 0
+    while attempt < retries:
+        try:
+            if not isinstance(file_id, str) or not file_id:
+                raise ValueError("file_id must be a non-empty string")
+            if not isinstance(message_id, int):
+                raise ValueError("message_id must be an integer")
+            if not isinstance(title, str) or not title:
+                raise ValueError("title must be a non-empty string")
+            if not isinstance(year, int):
+                raise ValueError("year must be an integer")
+            if not isinstance(quality, str):
+                raise ValueError("quality must be a string")
+            if not isinstance(file_size, str):
+                raise ValueError("file_size must be a string")
+            if language and not isinstance(language, str):
+                raise ValueError("language must be a string")
+            if channel_id and not isinstance(channel_id, str):
+                raise ValueError("channel_id must be a string")
+            if not channel_id:
+                raise ValueError("channel_id is required")
+            if channel_id and not channel_id.startswith('-100'):
+                raise ValueError("channel_id must start with '-100' for Telegram channels")
+
+            movie_doc = {
+                "title": title,
+                "year": year,
+                "quality": quality,
+                "file_size": file_size,
+                "file_id": file_id,
+                "message_id": message_id,
+                "channel_id": channel_id
+            }
+            if language:
+                movie_doc["language"] = language.lower()
+
+            result = movies_collection.insert_one(movie_doc)
+            logger.info(f"Added movie: {title} ({year}, {quality}, {language}) from channel {channel_id} with ID {result.inserted_id}")
+            return str(result.inserted_id)
+        except DuplicateKeyError:
+            logger.info(f"Skipped duplicate movie: {title} (file_id: {file_id}, message_id: {message_id}, channel_id: {channel_id})")
+            return None
+        except AutoReconnect as e:
+            attempt += 1
+            if attempt == retries:
+                logger.error(f"Failed to add movie {title} after {retries} attempts: {str(e)}")
+                raise
+            logger.warning(f"AutoReconnect error on attempt {attempt} for movie {title}: {str(e)}. Retrying...")
+            time.sleep(2 ** attempt)
+        except (PyMongoError, ValueError) as e:
+            logger.error(f"Error adding movie {title}: {str(e)}")
+            raise
+
+def add_movies_batch(movies):
+    """Add multiple movies to movies_collection in a single operation."""
     try:
-        if not isinstance(file_id, str) or not file_id:
-            raise ValueError("file_id must be a non-empty string")
-        if not isinstance(message_id, int):
-            raise ValueError("message_id must be an integer")
-        if not isinstance(title, str) or not title:
-            raise ValueError("title must be a non-empty string")
-        if not isinstance(year, int):
-            raise ValueError("year must be an integer")
-        if not isinstance(quality, str):
-            raise ValueError("quality must be a string")
-        if not isinstance(file_size, str):
-            raise ValueError("file_size must be a string")
-        if language and not isinstance(language, str):
-            raise ValueError("language must be a string")
-        if channel_id and not isinstance(channel_id, str):
-            raise ValueError("channel_id must be a string")
-        if not channel_id:
-            raise ValueError("channel_id is required")
+        if not isinstance(movies, list):
+            raise ValueError("movies must be a list of movie documents")
+        if not movies:
+            return []
+        inserted_ids = []
+        for movie in movies:
+            if not isinstance(movie.get("file_id"), str) or not movie["file_id"]:
+                raise ValueError("file_id must be a non-empty string")
+            if not isinstance(movie.get("message_id"), int):
+                raise ValueError("message_id must be an integer")
+            if not isinstance(movie.get("title"), str) or not movie["title"]:
+                raise ValueError("title must be a non-empty string")
+            if not isinstance(movie.get("year"), int):
+                raise ValueError("year must be an integer")
+            if not isinstance(movie.get("quality"), str):
+                raise ValueError("quality must be a string")
+            if not isinstance(movie.get("file_size"), str):
+                raise ValueError("file_size must be a string")
+            if movie.get("language") and not isinstance(movie["language"], str):
+                raise ValueError("language must be a string")
+            if not isinstance(movie.get("channel_id"), str):
+                raise ValueError("channel_id must be a string")
+            if not movie["channel_id"]:
+                raise ValueError("channel_id is required")
+            if not movie["channel_id"].startswith('-100'):
+                raise ValueError("channel_id must start with '-100' for Telegram channels")
+            if movie.get("language"):
+                movie["language"] = movie["language"].lower()
 
-        movie_doc = {
-            "title": title,
-            "year": year,
-            "quality": quality,
-            "file_size": file_size,
-            "file_id": file_id,
-            "message_id": message_id,
-            "channel_id": channel_id
-        }
-        if language:
-            movie_doc["language"] = language.lower()
-
-        result = movies_collection.insert_one(movie_doc)
-        logger.info(f"Added movie: {title} ({year}, {quality}, {language}) from channel {channel_id} with ID {result.inserted_id}")
-        return str(result.inserted_id)
+        result = movies_collection.insert_many(movies, ordered=False)
+        inserted_ids = [str(_id) for _id in result.inserted_ids]
+        logger.info(f"Added {len(inserted_ids)} movies in batch")
+        return inserted_ids
     except DuplicateKeyError:
-        logger.info(f"Skipped duplicate movie with file_id {file_id} and message_id {message_id}")
-        return None
+        logger.info("Skipped some duplicate movies in batch")
+        return inserted_ids
     except (PyMongoError, ValueError) as e:
-        logger.error(f"Error adding movie {title}: {str(e)}")
+        logger.error(f"Error adding movies in batch: {str(e)}")
         raise
 
 def search_movies(movie_name, year=None, language=None):
@@ -161,7 +227,6 @@ def search_movies(movie_name, year=None, language=None):
         if language and not isinstance(language, str):
             raise ValueError("language must be a string")
 
-        # Primary query with all filters
         query = {}
         if movie_name:
             terms = movie_name.split()
@@ -178,7 +243,6 @@ def search_movies(movie_name, year=None, language=None):
         ]
         logger.info(f"Found {len(movies)} movies for query: name={movie_name}, year={year}, language={language}")
 
-        # Fallback: If no results and year is specified, try without year
         if not movies and year:
             query.pop("year")
             results = movies_collection.find(query).limit(50)
