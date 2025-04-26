@@ -3,34 +3,21 @@ import time
 import logging
 import asyncio
 from PIL import Image
-from hachoir.metadata import extractMetadata
-from hachoir.parser import createParser
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError, BadRequest
 from telegram.ext import ConversationHandler
-from database import add_user, update_user_settings, get_user_settings, add_movie, search_movies
-from pymongo import MongoClient
-from dotenv import load_dotenv
+from database import add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies
+from utils import fix_thumb  # Import fix_thumb from utils.py
+from telegram.error import NetworkError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
-    SessionPasswordNeededError,
-    RPCError,
     FloodWaitError,
     ChannelPrivateError,
-    AuthKeyError
+    AuthKeyError,
+    RPCError
 )
 from bson.objectid import ObjectId
-
-# Load environment variables
-load_dotenv()
-
-# MongoDB connection
-MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
-db = client["movie_bot"]
-movies_collection = db["movies"]
-users_collection = db["users"]
 
 # Set up logging
 logging.basicConfig(
@@ -41,34 +28,6 @@ logger = logging.getLogger(__name__)
 
 # Conversation states
 SET_THUMBNAIL, SET_PREFIX, SET_CAPTION = range(3)
-
-async def fix_thumb(thumb):
-    """Process and resize thumbnail image to Baseline JPEG"""
-    width = 0
-    height = 0
-    try:
-        if thumb is not None:
-            metadata = extractMetadata(createParser(thumb))
-            if metadata is not None:
-                if metadata.has("width"):
-                    width = metadata.get("width")
-                if metadata.has("height"):
-                    height = metadata.get("height")
-                
-                # Convert and resize image
-                with Image.open(thumb) as img:
-                    img = img.convert("RGB")
-                    # Resize while maintaining aspect ratio
-                    new_width = 320
-                    aspect_ratio = height / width if width > 0 else 1
-                    new_height = int(new_width * aspect_ratio)
-                    img = img.resize((new_width, new_height))
-                    # Save as Baseline JPEG explicitly to avoid Progressive JPEG warning
-                    img.save(thumb, "JPEG", quality=95, optimize=True, progressive=False)
-                return width, height, thumb
-    except Exception as e:
-        logger.error(f"Error in fix_thumb: {str(e)}")
-    return width, height, None
 
 async def start(update, context):
     """Send welcome message when command /start is issued"""
@@ -113,6 +72,7 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
     unsupported = 0
     current = 0
     batch_number = 0
+    movie_batch = []
 
     try:
         async for msg in client.iter_messages(int(channel_id), limit=max_messages):
@@ -120,10 +80,8 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
                 break
 
             current += 1
-            batch_number = current // batch_size + 1
-
-            # Update progress at the start of each batch
             if current % batch_size == 1:
+                batch_number += 1
                 await context.bot.edit_message_text(
                     chat_id=progress_msg.chat_id,
                     message_id=progress_msg.message_id,
@@ -137,7 +95,6 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
                 )
 
             try:
-                # Skip non-documents or non-MKV files
                 if not msg.document or msg.document.mime_type != 'video/x-matroska':
                     unsupported += 1
                     continue
@@ -145,7 +102,6 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
                 file_name = msg.document.attributes[-1].file_name
                 message_id = msg.id
 
-                # Detect language from filename
                 language = None
                 name_lower = file_name.lower()
                 if 'tamil' in name_lower:
@@ -155,7 +111,6 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
                 elif 'hindi' in name_lower:
                     language = 'hindi'
 
-                # Get file ID by forwarding to bot
                 try:
                     forwarded = await context.bot.forward_message(
                         chat_id=context.bot.id,
@@ -176,37 +131,37 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
                     errors += 1
                     continue
 
-                # Parse movie info
                 try:
                     clean_name = file_name.replace('.mkv', '').split('_')
                     title = clean_name[0].replace('.', ' ').strip()
                     year = int(clean_name[1]) if len(clean_name) > 1 and clean_name[1].isdigit() else 0
                     quality = clean_name[2] if len(clean_name) > 2 else 'Unknown'
 
-                    # Format file size
                     size_bytes = msg.document.size
                     if size_bytes >= 1024 * 1024 * 1024:
                         file_size = f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
                     else:
                         file_size = f"{size_bytes / (1024 * 1024):.2f}MB"
 
-                    # Add to database
-                    movie_id = add_movie(
-                        title=title,
-                        year=year,
-                        quality=quality,
-                        file_size=file_size,
-                        file_id=file_id,
-                        message_id=message_id,
-                        language=language,
-                        channel_id=channel_id
-                    )
+                    movie_doc = {
+                        "title": title,
+                        "year": year,
+                        "quality": quality,
+                        "file_size": file_size,
+                        "file_id": file_id,
+                        "message_id": message_id,
+                        "channel_id": channel_id
+                    }
+                    if language:
+                        movie_doc["language"] = language
+                    movie_batch.append(movie_doc)
 
-                    if movie_id:
-                        total_files += 1
-                        logger.info(f"Indexed: {title} ({year})")
-                    else:
-                        duplicate += 1
+                    if len(movie_batch) >= batch_size:
+                        inserted_ids = add_movies_batch(movie_batch)
+                        total_files += len(inserted_ids)
+                        duplicate += batch_size - len(inserted_ids)
+                        movie_batch = []
+
                 except (IndexError, ValueError, AttributeError) as e:
                     logger.warning(f"Error parsing {file_name}: {str(e)}")
                     errors += 1
@@ -216,9 +171,14 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
                 errors += 1
                 continue
 
-            # Pause between batches to avoid flood limits
             if current % batch_size == 0:
-                await asyncio.sleep(5)  # 5-second delay between batches
+                await asyncio.sleep(5)
+
+        # Insert any remaining movies in the batch
+        if movie_batch:
+            inserted_ids = add_movies_batch(movie_batch)
+            total_files += len(inserted_ids)
+            duplicate += len(movie_batch) - len(inserted_ids)
 
     except FloodWaitError as fwe:
         logger.error(f"Flood wait error in batch {batch_number}: {fwe.seconds} seconds")
@@ -227,7 +187,6 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
             message_id=progress_msg.message_id,
             text=f"Flood wait error: Please wait {fwe.seconds} seconds before trying again."
         )
-        return total_files, duplicate, errors, unsupported, current
     except Exception as e:
         logger.error(f"Error in batch {batch_number}: {str(e)}")
         errors += 1
@@ -339,7 +298,7 @@ async def handle_forwarded_message(update, context):
                     client, forwarded_channel_id, progress_msg, context
                 )
             else:
-                # Single-pass indexing (original logic with minor improvements)
+                # Single-pass indexing
                 max_messages = 1000
                 async for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
                     if not context.user_data.get('indexing'):
@@ -483,6 +442,17 @@ async def search_movie(update, context):
     """Handle text-based movie search in personal messages."""
     chat_id = update.message.chat_id
     query = update.message.text.strip()
+    
+    # Rate limiting
+    current_time = time.time()
+    if chat_id in context.bot_data.get('recent_searches', {}):
+        last_query, last_time = context.bot_data['recent_searches'][chat_id]
+        if query == last_query and current_time - last_time < 30:
+            await update.message.reply_text("Please wait before repeating the same search.")
+            logger.info(f"User {chat_id} rate-limited for query: {query}")
+            return
+    context.bot_data.setdefault('recent_searches', {})[chat_id] = (query, current_time)
+
     logger.info(f"User {chat_id} searched for: '{query}'")
 
     if not query:
@@ -518,7 +488,7 @@ async def search_movie(update, context):
             movies = search_movies(movie_name, language=language)
             logger.info(f"No results for '{query}' with year={year}, falling back to no year")
 
-        if not movies0:
+        if not movies:
             await update.message.reply_text("No movies found. Try another search.")
             logger.info(f"No movies found for query: name={movie_name}, year={year}, language={language}")
             return
@@ -580,68 +550,21 @@ async def button_callback(update, context):
             await query.answer()
             return
 
-        # Retrieve user settings
-        thumbnail_file_id, prefix, caption = get_user_settings(user_id)
-        logger.info(f"User {user_id} settings for download - thumbnail: {thumbnail_file_id}, prefix: {prefix}, caption: {caption}")
+        from utils import process_file  # Import here to avoid circular imports
+        success = await process_file(
+            bot=context.bot,
+            chat_id=user_id,
+            file_id=movie['file_id'],
+            title=movie['title'],
+            quality=movie['quality'],
+            file_size=movie['file_size'],
+            message=query.message
+        )
 
-        # Prepare caption
-        language_str = f" {movie.get('language', '')}"
-        year_str = str(movie['year']) if movie['year'] != 0 else ''
-        default_caption = f"{movie['title']} ({year_str}){language_str} {movie['quality']}"
-        final_caption = caption if caption else default_caption
-
-        # Prepare filename with prefix
-        default_filename = f"{movie['title'].replace(' ', '_')}_{year_str}_{movie['quality']}.mkv"
-        final_filename = f"{prefix}{default_filename}" if prefix else default_filename
-
-        # Process the thumbnail if set
-        processed_thumbnail = None
-        if thumbnail_file_id:
-            try:
-                # Download the thumbnail
-                thumbnail_file = await context.bot.get_file(thumbnail_file_id)
-                thumbnail_path = f"/tmp/thumb_{user_id}_{time.time()}.jpg"
-                await thumbnail_file.download_to_drive(thumbnail_path)
-
-                # Process the thumbnail
-                _, _, processed_thumbnail = await fix_thumb(thumbnail_path)
-                if processed_thumbnail is None:
-                    logger.warning(f"User {user_id} - Thumbnail processing failed")
-            except Exception as e:
-                logger.error(f"User {user_id} - Error processing thumbnail: {str(e)}")
-
-        # Send the file to the user
-        try:
-            sent_message = await context.bot.send_document(
-                chat_id=user_id,
-                document=movie['file_id'],
-                filename=final_filename,
-                caption=f"{final_caption}  {movie['file_size']} MKV",
-                thumbnail=open(processed_thumbnail, "rb") if processed_thumbnail else None,  # Changed from thumb to thumbnail
-                parse_mode=None
-            )
-            logger.info(f"User {user_id} downloaded movie: {movie['title']}")
-
-            # If thumbnail couldn't be applied, send it separately
-            if processed_thumbnail and not sent_message.document.thumbnail:  # Changed from thumb to thumbnail
-                await query.message.reply_photo(
-                    photo=thumbnail_file_id,
-                    caption="Your custom thumbnail (couldn't be applied to the file)"
-                )
-        except telegram.error.BadRequest as e:
-            logger.error(f"BadRequest in send_document for user {user_id}: {str(e)}")
-            await query.message.reply_text("Error: The file may be too large or invalid.")
-            raise
-        except Exception as e:
-            logger.error(f"Error sending movie to user {user_id}: {str(e)}")
-            await query.message.reply_text("Error sending file. Please try again.")
-            raise
-
-        # Clean up
-        if processed_thumbnail and os.path.exists(processed_thumbnail):
-            os.remove(processed_thumbnail)
-
-        await query.answer(text="Download started!")
+        if success:
+            await query.answer(text="Download started!")
+        else:
+            await query.answer(text="Download failed.")
 
     except TelegramError as te:
         await query.message.reply_text("Error sending movie. Please try again later.")
@@ -680,7 +603,6 @@ async def handle_thumbnail(update, context):
         
     elif update.message.photo:
         thumbnail_file_id = update.message.photo[-1].file_id
-        # Validate file type
         try:
             file = await context.bot.get_file(thumbnail_file_id)
             if not file.file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
@@ -827,6 +749,11 @@ async def stats(update, context):
         logger.error(f"Error retrieving stats for user {chat_id}: {str(e)}")
 
 async def cancel(update, context):
-    """Cancel any ongoing conversation"""
+    """Cancel any ongoing conversation or indexing"""
+    chat_id = update.message.chat_id
+    context.user_data['indexing'] = False
+    context.user_data['index_channel_id'] = None
+    context.user_data['index_mode'] = None
     await update.message.reply_text('Operation cancelled.')
+    logger.info(f"User {chat_id} cancelled operation")
     return ConversationHandler.END
