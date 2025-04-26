@@ -35,9 +35,15 @@ if TELEGRAM_API_ID and TELEGRAM_API_HASH and SESSION_STRING:
             TELEGRAM_API_ID,
             TELEGRAM_API_HASH
         )
-        logger.info("Telethon client initialized")
+        # Verify session validity
+        async def verify_session():
+            async with telethon_client:
+                await telethon_client.get_me()
+        asyncio.run(verify_session())
+        logger.info("Telethon client initialized and session verified")
     except Exception as e:
         logger.error(f"Failed to initialize Telethon client: {str(e)}")
+        telethon_client = None
 else:
     logger.warning("Telethon credentials missing; large file downloads may fail")
 
@@ -89,6 +95,19 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
         thumb_file_id, prefix, caption = get_user_settings(chat_id)
         caption_text = caption or f"{prefix or ''} {title} [{quality}]".strip()
 
+        # Check file size and warn user if large
+        if file_size and float(file_size) > 50 * 1024 * 1024:  # 50MB in bytes
+            if not telethon_client:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="This file is too large (>50MB) and cannot be downloaded due to missing Telethon configuration. Please try a smaller file or contact the bot administrator."
+                )
+                raise ValueError("Telethon not configured for large file download")
+            await bot.send_message(
+                chat_id=chat_id,
+                text="This file is large (>50MB). Downloading may take longer or fail if the source is inaccessible. Please wait..."
+            )
+
         # Attempt to download using Bot API
         for attempt in range(max_retries):
             try:
@@ -133,13 +152,20 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
 
             async with telethon_client:
                 try:
-                    logger.info(f"Downloading large file {file_id} via Telethon for user {chat_id}")
+                    # Verify entity accessibility
+                    logger.info(f"Verifying access to channel {movie['channel_id']} for user {chat_id}, movie_id={movie_id}")
+                    entity = await telethon_client.get_entity(movie['channel_id'])
+                    if not entity:
+                        logger.error(f"Cannot access channel {movie['channel_id']} for user {chat_id}, movie_id={movie_id}")
+                        raise ValueError("Channel is inaccessible or does not exist")
+
+                    logger.info(f"Downloading large file {file_id} via Telethon for user {chat_id}, movie_id={movie_id}, channel_id={movie['channel_id']}, message_id={movie['message_id']}")
                     message_obj = await telethon_client.get_messages(
                         entity=movie['channel_id'],
                         ids=movie['message_id']
                     )
                     if not message_obj or not hasattr(message_obj, 'media') or not isinstance(message_obj.media, Document):
-                        logger.error(f"No valid media found for message {movie['message_id']} in channel {movie['channel_id']}")
+                        logger.error(f"No valid media found for message {movie['message_id']} in channel {movie['channel_id']}, movie_id={movie_id}")
                         raise ValueError("No valid media found")
 
                     async with aiofiles.tempfile.NamedTemporaryFile('wb', suffix='.mkv', delete=False) as temp_file:
@@ -149,11 +175,19 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
                             file=temp_file_path
                         )
                         logger.info(f"Downloaded large file to {temp_file_path} via Telethon for user {chat_id}")
-                except (FloodWaitError, ChannelPrivateError, FileReferenceExpiredError) as e:
-                    logger.error(f"Telethon download failed for user {chat_id}: {str(e)}")
+                except (FloodWaitError, ChannelPrivateError, FileReferenceExpiredError, ValueError) as e:
+                    logger.error(f"Telethon download failed for user {chat_id}, movie_id={movie_id}: {str(e)}")
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="Sorry, the file cannot be downloaded because the source channel is inaccessible or does not exist. Please try another file or contact the bot administrator."
+                    )
                     raise
                 except Exception as e:
-                    logger.error(f"Unexpected Telethon error for user {chat_id}: {str(e)}")
+                    logger.error(f"Unexpected Telethon error for user {chat_id}, movie_id={movie_id}: {str(e)}")
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="An unexpected error occurred while downloading the file. Please try again later or contact the bot administrator."
+                    )
                     raise
         elif not temp_file_path:
             logger.error(f"Cannot download file {file_id}: Telethon credentials missing")
