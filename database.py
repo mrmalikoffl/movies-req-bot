@@ -195,7 +195,8 @@ def search_movies(title, year=None, language=None, limit=10):
                 movie["file_size"],
                 movie["file_id"],
                 movie["message_id"],
-                movie["channel_id"]
+                movie.get("channel_id"),  # Use .get() to handle missing channel_id
+                movie.get("language")  # Include language for display
             ))
         logger.info(f"Found {len(results)} movies for query: title={title}, year={year}, language={language}")
         return results
