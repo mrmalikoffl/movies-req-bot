@@ -564,7 +564,7 @@ async def button_callback(update, context):
 
     try:
         movie_id = data.split("_", 1)[1]
-        movie = movies_collection.find_one({"_id": ObjectId(movie_id)})
+        movie = get_movie_by_id(movie_id)
 
         if not movie:
             await query.message.reply_text("Movie not found. It may have been deleted.")
@@ -572,7 +572,6 @@ async def button_callback(update, context):
             await query.answer()
             return
 
-        from utils import process_file  # Import here to avoid circular imports
         success = await process_file(
             bot=context.bot,
             chat_id=user_id,
@@ -580,7 +579,8 @@ async def button_callback(update, context):
             title=movie['title'],
             quality=movie['quality'],
             file_size=movie['file_size'],
-            message=query.message
+            message=query.message,
+            movie_id=movie_id  # Pass movie_id explicitly
         )
 
         if success:
