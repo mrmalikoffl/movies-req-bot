@@ -7,7 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError, BadRequest
 from telegram.ext import ConversationHandler
 from database import (
-    add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies, movies_collection
+    add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies, movies_collection, users_collection
 )
 from utils import fix_thumb
 from telegram.error import NetworkError
