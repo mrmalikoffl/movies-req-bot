@@ -9,7 +9,7 @@ from telegram.ext import ConversationHandler
 from database import (
     add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies, movies_collection, users_collection, get_movie_by_id
 )
-from utils import fix_thumb
+from utils import fix_thumb, process_file
 from telegram.error import NetworkError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
