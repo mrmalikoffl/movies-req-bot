@@ -2,13 +2,11 @@ import os
 import time
 import logging
 import asyncio
-from PIL import Image
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError, BadRequest
 from telegram.ext import ConversationHandler
 from database import add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies
-from utils import fix_thumb  # Import fix_thumb from utils.py
-from telegram.error import NetworkError
+from utils import fix_thumb, process_file  # Import fix_thumb and process_file from utils.py
+from telegram.error import TelegramError, BadRequest, NetworkError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
@@ -550,7 +548,6 @@ async def button_callback(update, context):
             await query.answer()
             return
 
-        from utils import process_file  # Import here to avoid circular imports
         success = await process_file(
             bot=context.bot,
             chat_id=user_id,
