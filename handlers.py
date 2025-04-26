@@ -9,7 +9,7 @@ from telegram.ext import ConversationHandler
 from database import (
     add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies, movies_collection
 )
-from utils import fix_thumb  # Import fix_thumb from utils.py
+from utils import fix_thumb
 from telegram.error import NetworkError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -109,22 +109,10 @@ async def batch_index(client, channel_id, progress_msg, context, batch_size=100,
                     language = 'hindi'
 
                 try:
-                    forwarded = await context.bot.forward_message(
-                        chat_id=context.bot.id,
-                        from_chat_id=channel_id,
-                        message_id=message_id
-                    )
-                    if not forwarded.document:
-                        unsupported += 1
-                        continue
-
-                    file_id = forwarded.document.file_id
-                    await context.bot.delete_message(
-                        chat_id=context.bot.id,
-                        message_id=forwarded.message_id
-                    )
-                except (TelegramError, BadRequest) as te:
-                    logger.error(f"Error getting file ID for {file_name}: {str(te)}")
+                    # Use Telethon to get file_id (access_hash and id)
+                    file_id = f"{msg.document.id}:{msg.document.access_hash}"
+                except Exception as e:
+                    logger.error(f"Error getting file ID for {file_name}: {str(e)}")
                     errors += 1
                     continue
 
@@ -353,22 +341,10 @@ async def handle_forwarded_message(update, context):
                             language = 'hindi'
 
                         try:
-                            forwarded = await context.bot.forward_message(
-                                chat_id=context.bot.id,
-                                from_chat_id=forwarded_channel_id,
-                                message_id=message_id
-                            )
-                            if not forwarded.document:
-                                unsupported += 1
-                                continue
-
-                            file_id = forwarded.document.file_id
-                            await context.bot.delete_message(
-                                chat_id=context.bot.id,
-                                message_id=forwarded.message_id
-                            )
-                        except (TelegramError, BadRequest) as te:
-                            logger.error(f"Error getting file ID for {file_name}: {str(te)}")
+                            # Use Telethon to get file_id (access_hash and id)
+                            file_id = f"{msg.document.id}:{msg.document.access_hash}"
+                        except Exception as e:
+                            logger.error(f"Error getting file ID for {file_name}: {str(e)}")
                             errors += 1
                             continue
 
