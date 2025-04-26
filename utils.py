@@ -75,7 +75,7 @@ async def get_file_metadata(file_path):
         logger.error(f"Error extracting metadata for {file_path}: {str(e)}")
         return None
 
-async def process_file(bot, chat_id, file_id, title, quality, file_size, message):
+async def process_file(bot, chat_id, file_id, title, quality, file_size, message, movie_id):
     """Download, process, and send a file to the user with retries."""
     from database import get_user_settings
     import aiofiles.os
@@ -123,13 +123,12 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
         # If Bot API download failed, try Telethon
         if not temp_file_path and telethon_client:
             from database import get_movie_by_id
-            # Assume movie_id is passed in file_id (from button_callback)
-            movie = get_movie_by_id(file_id.split('_')[0] if '_' in file_id else file_id)
+            movie = get_movie_by_id(movie_id)
             if not movie:
-                logger.error(f"Movie not found for file {file_id}")
+                logger.error(f"Movie not found for movie_id {movie_id}")
                 raise ValueError("Movie not found in database")
             if not movie.get('channel_id') or not movie.get('message_id'):
-                logger.error(f"Cannot use Telethon: Missing channel_id or message_id for file {file_id}")
+                logger.error(f"Cannot use Telethon: Missing channel_id or message_id for movie_id {movie_id}")
                 raise ValueError("Cannot download large file: Missing channel or message data")
 
             async with telethon_client:
