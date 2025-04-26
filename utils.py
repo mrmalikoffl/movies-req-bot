@@ -6,7 +6,6 @@ import tempfile
 from PIL import Image
 from telegram.error import TelegramError, BadRequest, NetworkError
 from database import get_user_settings
-from handlers import fix_thumb  # Import fix_thumb from handlers.py (adjust as needed)
 from hachoir.metadata import extractMetadata
 from hachoir.parser import createParser
 
@@ -17,6 +16,31 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
+
+async def fix_thumb(thumb):
+    """Process and resize thumbnail image to Baseline JPEG"""
+    width = 0
+    height = 0
+    try:
+        if thumb is not None:
+            metadata = extractMetadata(createParser(thumb))
+            if metadata is not None:
+                if metadata.has("width"):
+                    width = metadata.get("width")
+                if metadata.has("height"):
+                    height = metadata.get("height")
+                
+                with Image.open(thumb) as img:
+                    img = img.convert("RGB")
+                    new_width = 320
+                    aspect_ratio = height / width if width > 0 else 1
+                    new_height = int(new_width * aspect_ratio)
+                    img = img.resize((new_width, new_height))
+                    img.save(thumb, "JPEG", quality=95, optimize=True, progressive=False)
+                return width, height, thumb
+    except Exception as e:
+        logger.error(f"Error in fix_thumb: {str(e)}")
+    return width, height, None
 
 async def process_file(bot, chat_id, file_id, title, quality, file_size, message, retries=3):
     """
@@ -40,7 +64,6 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
     prefix = settings[1] if settings else ""
     caption = settings[2] if settings else f"{title} ({quality})"
 
-    # Use tempfile for unique temporary files
     with tempfile.NamedTemporaryFile(suffix=".mkv", dir=DOWNLOAD_DIR, delete=False) as movie_tmp, \
          tempfile.NamedTemporaryFile(suffix=".jpg", dir=DOWNLOAD_DIR, delete=False) as thumb_tmp:
         file_path = movie_tmp.name
@@ -97,7 +120,7 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
                         document=movie_file,
                         filename=filename,
                         caption=final_caption,
-                        thumbnail=thumb_file,  # Use 'thumbnail' as per Telegram API
+                        thumbnail=thumb_file,
                         parse_mode=None
                     )
                 return True
@@ -123,7 +146,6 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
             await message.reply_text("An unexpected error occurred. Please try again later.")
             return False
         finally:
-            # Clean up temporary files
             try:
                 if os.path.exists(file_path):
                     os.remove(file_path)
@@ -133,3 +155,14 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
                     logger.info(f"Deleted temporary thumbnail: {thumb_path}")
             except OSError as e:
                 logger.warning(f"Error cleaning up files for user {chat_id}: {str(e)}")
+
+def cleanup_download_dir():
+    """Clean up old files in DOWNLOAD_DIR on startup"""
+    for file in os.listdir(DOWNLOAD_DIR):
+        file_path = os.path.join(DOWNLOAD_DIR, file)
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                logger.info(f"Cleaned up old file: {file_path}")
+        except OSError as e:
+            logger.warning(f"Error cleaning up {file_path}: {str(e)}")
