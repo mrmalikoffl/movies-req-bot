@@ -514,9 +514,18 @@ async def search_movie(update, context):
         # Format results
         results = []
         for movie_data in movies:
-            movie_id, title, movie_year, quality, file_size, file_id, message_id, channel_id = movie_data
-            movie_doc = movies_collection.find_one({"_id": ObjectId(movie_id)})
-            movie_language = movie_doc.get('language', '') if movie_doc else ''
+            # Handle both 8 and 9 field tuples for compatibility
+            if len(movie_data) == 9:
+                movie_id, title, movie_year, quality, file_size, file_id, message_id, channel_id, movie_language = movie_data
+            else:
+                movie_id, title, movie_year, quality, file_size, file_id, message_id, channel_id = movie_data
+                movie_language = ""  # Default if language not provided
+
+            # Fetch language from DB if not in tuple
+            if not movie_language:
+                movie_doc = movies_collection.find_one({"_id": ObjectId(movie_id)})
+                movie_language = movie_doc.get('language', '') if movie_doc else ''
+
             language_str = movie_language if movie_language else (language if language else '')
             year_str = str(movie_year) if movie_year != 0 else ''
             result_line = f"[{file_size}] {title} {year_str} {language_str} {quality}".strip()
@@ -540,7 +549,6 @@ async def search_movie(update, context):
     except Exception as e:
         await update.message.reply_text("Error occurred. Please try again later.")
         logger.error(f"Error in search '{query}' by user {chat_id}: {str(e)}")
-
 async def button_callback(update, context):
     """Handle download button clicks."""
     query = update.callback_query
