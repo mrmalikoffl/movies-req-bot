@@ -92,7 +92,7 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
         # Attempt to download using Bot API
         for attempt in range(max_retries):
             try:
-                logger.info(f"Downloading file {file_id} for user {chat_id}")
+                logger.info(f"Downloading file {file_id} ({file_size}) via Bot API for user {chat_id}")
                 file = await bot.get_file(file_id)
                 file_path = file.file_path
 
@@ -123,26 +123,30 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
         # If Bot API download failed, try Telethon
         if not temp_file_path and telethon_client:
             from database import get_movie_by_id
-            movie = get_movie_by_id(file_id.split('_')[0])  # Extract movie_id from callback_data
-            if not movie or not movie.get('channel_id') or not movie.get('message_id'):
+            # Assume movie_id is passed in file_id (from button_callback)
+            movie = get_movie_by_id(file_id.split('_')[0] if '_' in file_id else file_id)
+            if not movie:
+                logger.error(f"Movie not found for file {file_id}")
+                raise ValueError("Movie not found in database")
+            if not movie.get('channel_id') or not movie.get('message_id'):
                 logger.error(f"Cannot use Telethon: Missing channel_id or message_id for file {file_id}")
                 raise ValueError("Cannot download large file: Missing channel or message data")
 
             async with telethon_client:
                 try:
                     logger.info(f"Downloading large file {file_id} via Telethon for user {chat_id}")
-                    message = await telethon_client.get_messages(
+                    message_obj = await telethon_client.get_messages(
                         entity=movie['channel_id'],
                         ids=movie['message_id']
                     )
-                    if not message or not hasattr(message, 'media') or not isinstance(message.media, Document):
+                    if not message_obj or not hasattr(message_obj, 'media') or not isinstance(message_obj.media, Document):
                         logger.error(f"No valid media found for message {movie['message_id']} in channel {movie['channel_id']}")
                         raise ValueError("No valid media found")
 
                     async with aiofiles.tempfile.NamedTemporaryFile('wb', suffix='.mkv', delete=False) as temp_file:
                         temp_file_path = temp_file.name
                         await telethon_client.download_media(
-                            message=message,
+                            message=message_obj,
                             file=temp_file_path
                         )
                         logger.info(f"Downloaded large file to {temp_file_path} via Telethon for user {chat_id}")
@@ -152,9 +156,13 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
                 except Exception as e:
                     logger.error(f"Unexpected Telethon error for user {chat_id}: {str(e)}")
                     raise
-
-        if not temp_file_path:
-            raise ValueError("Failed to download file via Bot API or Telethon")
+        elif not temp_file_path:
+            logger.error(f"Cannot download file {file_id}: Telethon credentials missing")
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Sorry, this file is too large to download due to configuration issues. Please contact the bot administrator."
+            )
+            raise ValueError("Failed to download file via Bot API or Telethon: Telethon credentials missing")
 
         # Process thumbnail
         if thumb_file_id:
