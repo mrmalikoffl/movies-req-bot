@@ -501,9 +501,9 @@ async def search_movie(update, context):
         # Format results
         results = []
         for movie_data in movies:
-            movie_id, title, movie_year, quality, file_size, file_id, message_id, channel_id = movie_data
-            # Language is already included in search_movies results if applicable
-            language_str = language if language else ''
+            movie_id, title, movie_year, quality, file_size, file_id, message_id, channel_id, movie_language = movie_data
+            # Use movie_language from the document, fall back to query language
+            language_str = movie_language or language or ''
             year_str = str(movie_year) if movie_year != 0 else ''
             result_line = f"[{file_size}] {title} {year_str} {language_str} {quality}".strip()
             results.append((result_line, movie_id))
@@ -526,7 +526,7 @@ async def search_movie(update, context):
     except Exception as e:
         await update.message.reply_text("Error occurred. Please try again later.")
         logger.error(f"Error in search '{query}' by user {chat_id}: {str(e)}")
-
+        
 async def button_callback(update, context):
     """Handle download button clicks."""
     query = update.callback_query
