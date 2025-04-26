@@ -24,7 +24,7 @@ load_dotenv()
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-SESSION_STRING = os.getenv("SESSION_STRING")
+SESSION_STRING = os.getenv("TELETHON_SESSION_STRING")  # Align with handlers.py
 
 # Initialize Telethon client
 telethon_client = None
@@ -102,8 +102,8 @@ async def process_file(bot, chat_id, file_id, title, quality, file_size, message
                     logger.info(f"Downloaded file to {temp_file_path} for user {chat_id}")
                     break
             except BadRequest as e:
-                if "File is too big" in str(e):
-                    logger.warning(f"Download attempt {attempt + 1} failed for user {chat_id}: File is too big. Retrying...")
+                if "File is too big" in str(e) or "Wrong file identifier" in str(e):
+                    logger.warning(f"Download attempt {attempt + 1} failed for user {chat_id}: {str(e)}. Retrying...")
                     if attempt == max_retries - 1:
                         logger.info(f"Falling back to Telethon for file {file_id} for user {chat_id}")
                         break
