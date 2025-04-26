@@ -223,19 +223,46 @@ async def handle_forwarded_message(update, context):
             logger.warning(f"User {chat_id} provided invalid indexing mode")
             return
 
-    # Check forward_origin for channel message
-    if not hasattr(update.message, 'forward_origin') or not update.message.forward_origin or update.message.forward_origin.type != 'channel':
+    # Log forwarded message details for debugging
+    logger.debug(f"Forwarded message details: "
+                f"forward_origin={update.message.forward_origin}, "
+                f"forward_from_chat={getattr(update.message, 'forward_from_chat', None)}, "
+                f"forward_from_message_id={getattr(update.message, 'forward_from_message_id', None)}, "
+                f"chat_id={update.message.chat.id}, "
+                f"message_id={update.message.message_id}")
+
+    # Check if the message is forwarded
+    if not update.message.forward_date:
         await update.message.reply_text("Please forward a message from a channel.")
-        logger.warning(f"User {chat_id} forwarded a non-channel message")
+        logger.warning(f"User {chat_id} sent a non-forwarded message")
         return
 
-    forwarded_channel_id = str(update.message.forward_origin.chat.id)
-    logger.info(f"User {chat_id} forwarded message from channel {forwarded_channel_id}")
+    # Check for channel message using forward_origin or forward_from_chat
+    forwarded_channel_id = None
+    if (hasattr(update.message, 'forward_origin') and update.message.forward_origin and 
+        update.message.forward_origin.type == 'channel'):
+        forwarded_channel_id = str(update.message.forward_origin.chat.id)
+    elif (hasattr(update.message, 'forward_from_chat') and update.message.forward_from_chat and 
+          update.message.forward_from_chat.type == 'channel'):
+        forwarded_channel_id = str(update.message.forward_from_chat.id)
+    elif str(update.message.chat.id).startswith('-100'):
+        # Fallback: Assume the message is from a channel if chat.id indicates a channel
+        forwarded_channel_id = str(update.message.chat.id)
+        logger.info(f"Using fallback channel ID {forwarded_channel_id} for user {chat_id}")
+
+    if not forwarded_channel_id:
+        await update.message.reply_text("Please forward a message directly from a channel.")
+        logger.warning(f"User {chat_id} forwarded a non-channel message: "
+                      f"forward_origin={update.message.forward_origin}, "
+                      f"forward_from_chat={getattr(update.message, 'forward_from_chat', None)}")
+        return
 
     if not forwarded_channel_id.startswith('-100'):
         await update.message.reply_text("Invalid channel ID. Please forward a message from a valid Telegram channel.")
         logger.warning(f"Invalid channel ID {forwarded_channel_id} for user {chat_id}")
         return
+
+    logger.info(f"User {chat_id} forwarded message from channel {forwarded_channel_id}")
 
     try:
         # Verify bot is admin
@@ -291,7 +318,7 @@ async def handle_forwarded_message(update, context):
             current = 0
 
             if context.user_data['index_mode'] == 'batch':
-                # Batch indexing
+                # Batch indexing (assuming batch_index is defined elsewhere)
                 total_files, duplicate, errors, unsupported, current = await batch_index(
                     client, forwarded_channel_id, progress_msg, context
                 )
