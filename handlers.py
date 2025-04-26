@@ -6,17 +6,14 @@ from PIL import Image
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError, BadRequest
 from telegram.ext import ConversationHandler
-from database import add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies
+from database import (
+    add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies, movies_collection
+)
 from utils import fix_thumb  # Import fix_thumb from utils.py
 from telegram.error import NetworkError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import (
-    FloodWaitError,
-    ChannelPrivateError,
-    AuthKeyError,
-    RPCError
-)
+from telethon.errors import FloodWaitError, ChannelPrivateError, AuthKeyError, RPCError
 from bson.objectid import ObjectId
 
 # Set up logging
@@ -244,7 +241,6 @@ async def handle_forwarded_message(update, context):
     if hasattr(update.message, 'forward_from_chat') and update.message.forward_from_chat and update.message.forward_from_chat.type == 'channel':
         forwarded_channel_id = str(update.message.forward_from_chat.id)
     elif str(update.message.chat.id).startswith('-100'):
-        # Fallback: Assume the message is from a channel if chat.id indicates a channel
         forwarded_channel_id = str(update.message.chat.id)
         logger.info(f"Using fallback channel ID {forwarded_channel_id} for user {chat_id}")
 
@@ -287,16 +283,16 @@ async def handle_forwarded_message(update, context):
             )
         )
 
-        # Set up Telethon client
+        # Set up Telethon client with user session
         api_id = os.getenv("TELEGRAM_API_ID")
         api_hash = os.getenv("TELEGRAM_API_HASH")
-        bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        session_string = os.getenv("TELETHON_SESSION_STRING")
 
-        if not all([api_id, api_hash, bot_token]):
+        if not all([api_id, api_hash, session_string]):
             missing = [var for var, val in [
                 ("TELEGRAM_API_ID", api_id),
                 ("TELEGRAM_API_HASH", api_hash),
-                ("TELEGRAM_BOT_TOKEN", bot_token)
+                ("TELETHON_SESSION_STRING", session_string)
             ] if not val]
             error_msg = f"Missing environment variables: {', '.join(missing)}"
             await update.message.reply_text(f"Configuration error: {error_msg}")
@@ -304,8 +300,8 @@ async def handle_forwarded_message(update, context):
             return
 
         try:
-            client = TelegramClient(StringSession(), int(api_id), api_hash)
-            await client.start(bot_token=bot_token)
+            client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
+            await client.start()
             logger.info("TelegramClient authenticated successfully")
 
             total_files = 0
@@ -315,7 +311,6 @@ async def handle_forwarded_message(update, context):
             current = 0
 
             if context.user_data['index_mode'] == 'batch':
-                # Batch indexing (assuming batch_index is defined elsewhere)
                 total_files, duplicate, errors, unsupported, current = await batch_index(
                     client, forwarded_channel_id, progress_msg, context
                 )
@@ -564,6 +559,7 @@ async def button_callback(update, context):
 
     try:
         movie_id = data.split("_", 1)[1]
+        # TODO: Ensure get_movie_by_id is defined in database.py or another module
         movie = get_movie_by_id(movie_id)
 
         if not movie:
@@ -572,6 +568,7 @@ async def button_callback(update, context):
             await query.answer()
             return
 
+        # TODO: Ensure process_file is defined in utils.py or another module
         success = await process_file(
             bot=context.bot,
             chat_id=user_id,
@@ -580,7 +577,7 @@ async def button_callback(update, context):
             quality=movie['quality'],
             file_size=movie['file_size'],
             message=query.message,
-            movie_id=movie_id  # Pass movie_id explicitly
+            movie_id=movie_id
         )
 
         if success:
