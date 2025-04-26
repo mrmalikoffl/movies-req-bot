@@ -30,7 +30,9 @@ from handlers import (
     SET_PREFIX,
     SET_CAPTION
 )
+from database import check_db_connection
 from dotenv import load_dotenv
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -42,6 +44,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     logger.error("Missing TELEGRAM_BOT_TOKEN")
     raise ValueError("Missing TELEGRAM_BOT_TOKEN")
+
+# Bot version (update this as needed)
+BOT_VERSION = "1.0.0"
 
 # Global variable to track recent searches for deduplication
 recent_searches = {}
@@ -55,9 +60,21 @@ async def error_handler(update, context):
             await update.callback_query.message.reply_text("An error occurred. Please try again later.")
             await update.callback_query.answer()
 
+async def cancel(update, context):
+    """Cancel any ongoing conversation."""
+    await update.message.reply_text("Operation cancelled.")
+    logger.info(f"User {update.message.chat_id} cancelled operation")
+    return ConversationHandler.END
+
 async def main():
     try:
-        logger.info(f"Starting Telegram bot with token: {TELEGRAM_BOT_TOKEN[:10]}...")
+        logger.info(f"Starting Telegram bot (version {BOT_VERSION}) with token: {TELEGRAM_BOT_TOKEN[:10]}...")
+
+        # Check MongoDB connection
+        if not check_db_connection():
+            logger.error("Failed to connect to MongoDB. Exiting...")
+            raise RuntimeError("MongoDB connection failed")
+
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
         # Command handlers
@@ -68,38 +85,45 @@ async def main():
         application.add_handler(CommandHandler("viewprefix", view_prefix))
         application.add_handler(CommandHandler("viewcaption", view_caption))
 
-        # Conversation handlers
+        # Conversation handlers with cancel fallback
         thumbnail_conv = ConversationHandler(
             entry_points=[CommandHandler("setthumbnail", set_thumbnail)],
             states={
                 SET_THUMBNAIL: [MessageHandler(filters.PHOTO | filters.TEXT, handle_thumbnail)]
             },
-            fallbacks=[]
+            fallbacks=[CommandHandler("cancel", cancel)]
         )
         prefix_conv = ConversationHandler(
             entry_points=[CommandHandler("setprefix", set_prefix)],
             states={
                 SET_PREFIX: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prefix)]
             },
-            fallbacks=[]
+            fallbacks=[CommandHandler("cancel", cancel)]
         )
         caption_conv = ConversationHandler(
             entry_points=[CommandHandler("setcaption", set_caption)],
             states={
                 SET_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_caption)]
             },
-            fallbacks=[]
+            fallbacks=[CommandHandler("cancel", cancel)]
         )
         application.add_handler(thumbnail_conv)
         application.add_handler(prefix_conv)
         application.add_handler(caption_conv)
 
-        # Indexing handler
+        # Indexing handlers
         application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, handle_forwarded_message))
+        application.add_handler(MessageHandler(
+            filters.Regex('^(batch|single)$') & filters.ChatType.PRIVATE,
+            handle_forwarded_message
+        ))
         application.add_handler(CallbackQueryHandler(handle_forwarded_message, pattern='^index_cancel$'))
 
         # Search and download handlers
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_movie))
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            search_movie
+        ))
         application.add_handler(CallbackQueryHandler(button_callback, pattern='^download_.*$'))
 
         # Error handler
@@ -118,7 +142,7 @@ async def main():
         logger.info("Bot started polling")
         await application.initialize()
         await application.start()
-        await application.updater.start_polling()
+        await application.updater.start_polling(poll_timeout=10.0)
         logger.info("Bot is polling...")
         await asyncio.Event().wait()  # Keep the bot running
 
