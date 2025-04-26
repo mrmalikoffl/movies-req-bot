@@ -554,7 +554,8 @@ async def button_callback(update, context):
             title=movie['title'],
             quality=movie['quality'],
             file_size=movie['file_size'],
-            message=query.message
+            message=query.message,
+            movie_id=movie_id  # Pass movie_id explicitly
         )
 
         if success:
