@@ -100,9 +100,9 @@ async def main():
     application = (
         Application.builder()
         .token(bot_token)
-        .read_timeout(20.0)  # Timeout for reading updates
-        .write_timeout(20.0)  # Timeout for sending updates
-        .connect_timeout(20.0)  # Timeout for connecting to Telegram
+        .read_timeout(20.0)
+        .write_timeout(20.0)
+        .connect_timeout(20.0)
         .build()
     )
 
@@ -139,7 +139,7 @@ async def main():
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        per_message=True,  # Ensure CallbackQueryHandler is tracked for every message
+        per_message=False  # Changed to False to resolve PTBUserWarning
     )
     application.add_handler(settings_conv_handler)
 
@@ -162,8 +162,8 @@ async def main():
 
         # Start polling with timeout configuration
         await application.updater.start_polling(
-            timeout=20.0,  # Timeout for getUpdates requests
-            drop_pending_updates=True,  # Drop pending updates on startup
+            timeout=20.0,
+            drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
         )
 
