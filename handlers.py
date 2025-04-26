@@ -4,8 +4,8 @@ import logging
 import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ConversationHandler
-from database import add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies
-from utils import fix_thumb, process_file  # Import fix_thumb and process_file from utils.py
+from database import add_user, update_user_settings, get_user_settings, add_movie, add_movies_batch, search_movies, get_movie_by_id
+from utils import fix_thumb, process_file
 from telegram.error import TelegramError, BadRequest, NetworkError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
