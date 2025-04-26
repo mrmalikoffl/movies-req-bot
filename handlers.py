@@ -502,9 +502,8 @@ async def search_movie(update, context):
         results = []
         for movie_data in movies:
             movie_id, title, movie_year, quality, file_size, file_id, message_id, channel_id = movie_data
-            movie_doc = movies_collection.find_one({"_id": ObjectId(movie_id)})
-            movie_language = movie_doc.get('language', '') if movie_doc else ''
-            language_str = movie_language if movie_language else (language if language else '')
+            # Language is already included in search_movies results if applicable
+            language_str = language if language else ''
             year_str = str(movie_year) if movie_year != 0 else ''
             result_line = f"[{file_size}] {title} {year_str} {language_str} {quality}".strip()
             results.append((result_line, movie_id))
@@ -540,7 +539,7 @@ async def button_callback(update, context):
 
     try:
         movie_id = data.split("_", 1)[1]
-        movie = movies_collection.find_one({"_id": ObjectId(movie_id)})
+        movie = get_movie_by_id(movie_id)
 
         if not movie:
             await query.message.reply_text("Movie not found. It may have been deleted.")
@@ -571,7 +570,7 @@ async def button_callback(update, context):
         await query.message.reply_text("An error occurred. Please try again later.")
         logger.error(f"Error in download for {movie_id} by user {user_id}: {str(e)}")
         await query.answer(text="Download error.")
-
+        
 async def set_thumbnail(update, context):
     """Initiate thumbnail setting process"""
     await update.message.reply_text(
