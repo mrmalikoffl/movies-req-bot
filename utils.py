@@ -1,168 +1,199 @@
 import os
 import logging
+import aiofiles
 import asyncio
-import time
-import tempfile
 from PIL import Image
-from telegram.error import TelegramError, BadRequest, NetworkError
-from database import get_user_settings
-from hachoir.metadata import extractMetadata
 from hachoir.parser import createParser
+from hachoir.metadata import extractMetadata
+from telegram.error import TelegramError, BadRequest, NetworkError
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.tl.types import Document
+from telethon.errors import FloodWaitError, ChannelPrivateError, FileReferenceExpiredError
+from dotenv import load_dotenv
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-DOWNLOAD_DIR = "downloads"
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
+# Load environment variables
+load_dotenv()
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+SESSION_STRING = os.getenv("SESSION_STRING")
 
-async def fix_thumb(thumb):
-    """Process and resize thumbnail image to Baseline JPEG"""
-    width = 0
-    height = 0
+# Initialize Telethon client
+telethon_client = None
+if TELEGRAM_API_ID and TELEGRAM_API_HASH and SESSION_STRING:
     try:
-        if thumb is not None:
-            metadata = extractMetadata(createParser(thumb))
-            if metadata is not None:
-                if metadata.has("width"):
-                    width = metadata.get("width")
-                if metadata.has("height"):
-                    height = metadata.get("height")
-                
-                with Image.open(thumb) as img:
-                    img = img.convert("RGB")
-                    new_width = 320
-                    aspect_ratio = height / width if width > 0 else 1
-                    new_height = int(new_width * aspect_ratio)
-                    img = img.resize((new_width, new_height))
-                    img.save(thumb, "JPEG", quality=95, optimize=True, progressive=False)
-                return width, height, thumb
+        telethon_client = TelegramClient(
+            StringSession(SESSION_STRING),
+            TELEGRAM_API_ID,
+            TELEGRAM_API_HASH
+        )
+        logger.info("Telethon client initialized")
     except Exception as e:
-        logger.error(f"Error in fix_thumb: {str(e)}")
-    return width, height, None
+        logger.error(f"Failed to initialize Telethon client: {str(e)}")
+else:
+    logger.warning("Telethon credentials missing; large file downloads may fail")
 
-async def process_file(bot, chat_id, file_id, title, quality, file_size, message, retries=3):
-    """
-    Asynchronously download a movie file, apply user settings (thumbnail, prefix, caption), and send it to the user.
-    
-    Args:
-        bot: Telegram Bot instance
-        chat_id: User chat ID (int)
-        file_id: File ID of the movie (str)
-        title: Movie title (str)
-        quality: Movie quality (str)
-        file_size: File size (str, e.g., "1.2GB")
-        message: Telegram message object for replying
-        retries: Number of retry attempts for downloads (int)
-    
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    settings = get_user_settings(chat_id)
-    thumbnail_file_id = settings[0] if settings else None
-    prefix = settings[1] if settings else ""
-    caption = settings[2] if settings else f"{title} ({quality})"
+async def fix_thumb(thumb_path):
+    """Optimize thumbnail image."""
+    try:
+        async with aiofiles.tempfile.NamedTemporaryFile('wb', suffix='.jpg', delete=False) as temp_file:
+            temp_path = temp_file.name
+            img = Image.open(thumb_path)
+            img = img.convert('RGB')
+            img.thumbnail((320, 320))
+            img.save(temp_path, 'JPEG', quality=85)
+            logger.info(f"Optimized thumbnail: {temp_path}")
+            return temp_path
+    except Exception as e:
+        logger.error(f"Error optimizing thumbnail {thumb_path}: {str(e)}")
+        return thumb_path
 
-    with tempfile.NamedTemporaryFile(suffix=".mkv", dir=DOWNLOAD_DIR, delete=False) as movie_tmp, \
-         tempfile.NamedTemporaryFile(suffix=".jpg", dir=DOWNLOAD_DIR, delete=False) as thumb_tmp:
-        file_path = movie_tmp.name
-        thumb_path = thumb_tmp.name
+async def get_file_metadata(file_path):
+    """Extract metadata from a media file."""
+    try:
+        parser = createParser(file_path)
+        if not parser:
+            logger.warning(f"Could not parse metadata for {file_path}")
+            return None
+        metadata = extractMetadata(parser)
+        if not metadata:
+            logger.warning(f"No metadata found for {file_path}")
+            return None
+        meta_dict = {k: v for k, v in metadata.exportDictionary().items() if isinstance(v, (str, int, float))}
+        parser.close()
+        logger.info(f"Extracted metadata for {file_path}: {meta_dict}")
+        return meta_dict
+    except Exception as e:
+        logger.error(f"Error extracting metadata for {file_path}: {str(e)}")
+        return None
 
-        try:
-            # Download movie file with retries
-            logger.info(f"Downloading file {file_id} for user {chat_id}")
-            attempt = 0
-            while attempt < retries:
-                try:
-                    file = await bot.get_file(file_id)
-                    await file.download_to_drive(file_path)
+async def process_file(bot, chat_id, file_id, title, quality, file_size, message):
+    """Download, process, and send a file to the user with retries."""
+    from database import get_user_settings
+    import aiofiles.os
+
+    max_retries = 3
+    temp_file_path = None
+    temp_thumb_path = None
+
+    try:
+        # Get user settings
+        thumb_file_id, prefix, caption = get_user_settings(chat_id)
+        caption_text = caption or f"{prefix or ''} {title} [{quality}]".strip()
+
+        # Attempt to download using Bot API
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Downloading file {file_id} for user {chat_id}")
+                file = await bot.get_file(file_id)
+                file_path = file.file_path
+
+                async with aiofiles.tempfile.NamedTemporaryFile('wb', suffix='.mkv', delete=False) as temp_file:
+                    temp_file_path = temp_file.name
+                    await file.download_to_path(temp_file_path)
+                    logger.info(f"Downloaded file to {temp_file_path} for user {chat_id}")
                     break
-                except (NetworkError, TelegramError) as e:
-                    attempt += 1
-                    if attempt == retries:
-                        logger.error(f"Failed to download file {file_id} for user {chat_id} after {retries} attempts: {str(e)}")
-                        await message.reply_text("Sorry, I couldn't download the file. Please try again later.")
-                        return False
-                    logger.warning(f"Download attempt {attempt} failed for user {chat_id}: {str(e)}. Retrying...")
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
-
-            # Prepare thumbnail
-            logger.info(f"Preparing thumbnail for user {chat_id}, thumbnail_file_id: {thumbnail_file_id}")
-            processed_thumb = None
-            if thumbnail_file_id:
-                try:
-                    thumb_file = await bot.get_file(thumbnail_file_id)
-                    await thumb_file.download_to_drive(thumb_path)
-                    _, _, processed_thumb = await fix_thumb(thumb_path)
-                    if not processed_thumb:
-                        logger.warning(f"Thumbnail processing failed for user {chat_id}")
-                        processed_thumb = None
-                except (TelegramError, IOError) as e:
-                    logger.warning(f"Failed to process custom thumbnail for user {chat_id}: {str(e)}")
-                    processed_thumb = None
-
-            # Create default thumbnail if custom thumbnail fails or is not set
-            if not processed_thumb:
-                with Image.new('RGB', (320, 180), color='blue') as img:
-                    img.save(thumb_path, "JPEG", quality=95, optimize=True, progressive=False)
-                processed_thumb = thumb_path
-
-            # Prepare filename and caption
-            filename = f"{prefix}{title.replace(' ', '_')}_{quality}.mkv"
-            final_caption = f"[{file_size}] {caption} MKV"
-
-            # Send file
-            logger.info(f"Sending file {filename} to user {chat_id}")
-            try:
-                with open(file_path, 'rb') as movie_file, open(processed_thumb, 'rb') as thumb_file:
-                    await message.reply_document(
-                        document=movie_file,
-                        filename=filename,
-                        caption=final_caption,
-                        thumbnail=thumb_file,
-                        parse_mode=None
-                    )
-                return True
             except BadRequest as e:
-                logger.error(f"BadRequest sending file to user {chat_id}: {str(e)}")
-                await message.reply_text("Error: The file or thumbnail is invalid. Please try again.")
-                return False
-            except NetworkError as e:
-                logger.error(f"Network error sending file to user {chat_id}: {str(e)}")
-                await message.reply_text("Network error while sending the file. Please try again later.")
-                return False
+                if "File is too big" in str(e):
+                    logger.warning(f"Download attempt {attempt + 1} failed for user {chat_id}: File is too big. Retrying...")
+                    if attempt == max_retries - 1:
+                        logger.info(f"Falling back to Telethon for file {file_id} for user {chat_id}")
+                        break
+                else:
+                    logger.error(f"BadRequest in download attempt {attempt + 1} for user {chat_id}: {str(e)}")
+                    if attempt == max_retries - 1:
+                        raise
+            except (NetworkError, TelegramError) as e:
+                logger.warning(f"Download attempt {attempt + 1} failed for user {chat_id}: {str(e)}. Retrying...")
+                await asyncio.sleep(2 ** attempt)
+                if attempt == max_retries - 1:
+                    raise
+            except Exception as e:
+                logger.error(f"Unexpected error in download attempt {attempt + 1} for user {chat_id}: {str(e)}")
+                raise
 
-        except TelegramError as e:
-            logger.error(f"Telegram error processing file for user {chat_id}: {str(e)}")
-            await message.reply_text("Sorry, there was an error downloading or sending the file. Please try again.")
-            return False
-        except IOError as e:
-            logger.error(f"File I/O error for user {chat_id}: {str(e)}")
-            await message.reply_text("Sorry, there was an error processing the file. Please try again.")
-            return False
-        except Exception as e:
-            logger.error(f"Unexpected error for user {chat_id}: {str(e)}")
-            await message.reply_text("An unexpected error occurred. Please try again later.")
-            return False
-        finally:
+        # If Bot API download failed, try Telethon
+        if not temp_file_path and telethon_client:
+            from database import get_movie_by_id
+            movie = get_movie_by_id(file_id.split('_')[0])  # Extract movie_id from callback_data
+            if not movie or not movie.get('channel_id') or not movie.get('message_id'):
+                logger.error(f"Cannot use Telethon: Missing channel_id or message_id for file {file_id}")
+                raise ValueError("Cannot download large file: Missing channel or message data")
+
+            async with telethon_client:
+                try:
+                    logger.info(f"Downloading large file {file_id} via Telethon for user {chat_id}")
+                    message = await telethon_client.get_messages(
+                        entity=movie['channel_id'],
+                        ids=movie['message_id']
+                    )
+                    if not message or not hasattr(message, 'media') or not isinstance(message.media, Document):
+                        logger.error(f"No valid media found for message {movie['message_id']} in channel {movie['channel_id']}")
+                        raise ValueError("No valid media found")
+
+                    async with aiofiles.tempfile.NamedTemporaryFile('wb', suffix='.mkv', delete=False) as temp_file:
+                        temp_file_path = temp_file.name
+                        await telethon_client.download_media(
+                            message=message,
+                            file=temp_file_path
+                        )
+                        logger.info(f"Downloaded large file to {temp_file_path} via Telethon for user {chat_id}")
+                except (FloodWaitError, ChannelPrivateError, FileReferenceExpiredError) as e:
+                    logger.error(f"Telethon download failed for user {chat_id}: {str(e)}")
+                    raise
+                except Exception as e:
+                    logger.error(f"Unexpected Telethon error for user {chat_id}: {str(e)}")
+                    raise
+
+        if not temp_file_path:
+            raise ValueError("Failed to download file via Bot API or Telethon")
+
+        # Process thumbnail
+        if thumb_file_id:
             try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    logger.info(f"Deleted temporary file: {file_path}")
-                if os.path.exists(thumb_path):
-                    os.remove(thumb_path)
-                    logger.info(f"Deleted temporary thumbnail: {thumb_path}")
-            except OSError as e:
-                logger.warning(f"Error cleaning up files for user {chat_id}: {str(e)}")
+                thumb_file = await bot.get_file(thumb_file_id)
+                async with aiofiles.tempfile.NamedTemporaryFile('wb', suffix='.jpg', delete=False) as temp_thumb:
+                    temp_thumb_path = temp_thumb.name
+                    await thumb_file.download_to_path(temp_thumb_path)
+                    temp_thumb_path = await fix_thumb(temp_thumb_path)
+                    logger.info(f"Processed thumbnail for user {chat_id}: {temp_thumb_path}")
+            except Exception as e:
+                logger.error(f"Error processing thumbnail for user {chat_id}: {str(e)}")
+                temp_thumb_path = None
 
-def cleanup_download_dir():
-    """Clean up old files in DOWNLOAD_DIR on startup"""
-    for file in os.listdir(DOWNLOAD_DIR):
-        file_path = os.path.join(DOWNLOAD_DIR, file)
+        # Send file
+        async with aiofiles.open(temp_file_path, 'rb') as f:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                caption=caption_text,
+                thumb=temp_thumb_path,
+                reply_to_message_id=message.message_id,
+                parse_mode='HTML'
+            )
+            logger.info(f"Sent file {title} to user {chat_id}")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to download file {file_id} for user {chat_id} after {max_retries} attempts: {str(e)}")
+        return False
+    finally:
+        # Clean up temporary files
         try:
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-                logger.info(f"Cleaned up old file: {file_path}")
-        except OSError as e:
-            logger.warning(f"Error cleaning up {file_path}: {str(e)}")
+            if temp_file_path and await aiofiles.os.path.exists(temp_file_path):
+                await aiofiles.os.remove(temp_file_path)
+                logger.info(f"Deleted temporary file: {temp_file_path}")
+            if temp_thumb_path and await aiofiles.os.path.exists(temp_thumb_path):
+                await aiofiles.os.remove(temp_thumb_path)
+                logger.info(f"Deleted temporary thumbnail: {temp_thumb_path}")
+        except Exception as e:
+            logger.error(f"Error cleaning up temporary files: {str(e)}")
