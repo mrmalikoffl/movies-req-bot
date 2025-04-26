@@ -91,40 +91,188 @@ async def start(update, context):
     logger.info(f"User {chat_id} started the bot")
 
 async def index(update, context):
-    """Initiate channel indexing process"""
+    """Initiate channel indexing process (single or batch)"""
     chat_id = update.message.chat_id
     await update.message.reply_text(
-        "Please forward a message from a channel where I am an admin to index all MKV files.",
+        "Please forward a message from a channel where I am an admin to index MKV files.\n"
+        "Reply with 'batch' to index in batches or 'single' for single-pass indexing.",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
         )
     )
     context.user_data['indexing'] = True
     context.user_data['index_channel_id'] = None
+    context.user_data['index_mode'] = None
     logger.info(f"User {chat_id} initiated indexing")
 
+async def batch_index(client, channel_id, progress_msg, context, batch_size=100, max_messages=1000):
+    """Process channel messages in batches to index MKV files"""
+    total_files = 0
+    duplicate = 0
+    errors = 0
+    unsupported = 0
+    current = 0
+    batch_number = 0
+
+    try:
+        async for msg in client.iter_messages(int(channel_id), limit=max_messages):
+            if not context.user_data.get('indexing'):
+                break
+
+            current += 1
+            batch_number = current // batch_size + 1
+
+            # Update progress at the start of each batch
+            if current % batch_size == 1:
+                await context.bot.edit_message_text(
+                    chat_id=progress_msg.chat_id,
+                    message_id=progress_msg.message_id,
+                    text=(
+                        f"Batch {batch_number} in progress...\n"
+                        f"Messages processed: {current}\n"
+                        f"Movies indexed: {total_files}\n"
+                        f"Duplicates skipped: {duplicate}\n"
+                        f"Unsupported skipped: {unsupported}"
+                    )
+                )
+
+            try:
+                # Skip non-documents or non-MKV files
+                if not msg.document or msg.document.mime_type != 'video/x-matroska':
+                    unsupported += 1
+                    continue
+
+                file_name = msg.document.attributes[-1].file_name
+                message_id = msg.id
+
+                # Detect language from filename
+                language = None
+                name_lower = file_name.lower()
+                if 'tamil' in name_lower:
+                    language = 'tamil'
+                elif 'english' in name_lower:
+                    language = 'english'
+                elif 'hindi' in name_lower:
+                    language = 'hindi'
+
+                # Get file ID by forwarding to bot
+                try:
+                    forwarded = await context.bot.forward_message(
+                        chat_id=context.bot.id,
+                        from_chat_id=channel_id,
+                        message_id=message_id
+                    )
+                    if not forwarded.document:
+                        unsupported += 1
+                        continue
+
+                    file_id = forwarded.document.file_id
+                    await context.bot.delete_message(
+                        chat_id=context.bot.id,
+                        message_id=forwarded.message_id
+                    )
+                except (TelegramError, BadRequest) as te:
+                    logger.error(f"Error getting file ID for {file_name}: {str(te)}")
+                    errors += 1
+                    continue
+
+                # Parse movie info
+                try:
+                    clean_name = file_name.replace('.mkv', '').split('_')
+                    title = clean_name[0].replace('.', ' ').strip()
+                    year = int(clean_name[1]) if len(clean_name) > 1 and clean_name[1].isdigit() else 0
+                    quality = clean_name[2] if len(clean_name) > 2 else 'Unknown'
+
+                    # Format file size
+                    size_bytes = msg.document.size
+                    if size_bytes >= 1024 * 1024 * 1024:
+                        file_size = f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
+                    else:
+                        file_size = f"{size_bytes / (1024 * 1024):.2f}MB"
+
+                    # Add to database
+                    movie_id = add_movie(
+                        title=title,
+                        year=year,
+                        quality=quality,
+                        file_size=file_size,
+                        file_id=file_id,
+                        message_id=message_id,
+                        language=language,
+                        channel_id=channel_id
+                    )
+
+                    if movie_id:
+                        total_files += 1
+                        logger.info(f"Indexed: {title} ({year})")
+                    else:
+                        duplicate += 1
+                except (IndexError, ValueError, AttributeError) as e:
+                    logger.warning(f"Error parsing {file_name}: {str(e)}")
+                    errors += 1
+
+            except Exception as e:
+                logger.error(f"Error processing message {message_id}: {str(e)}")
+                errors += 1
+                continue
+
+            # Pause between batches to avoid flood limits
+            if current % batch_size == 0:
+                await asyncio.sleep(5)  # 5-second delay between batches
+
+    except FloodWaitError as fwe:
+        logger.error(f"Flood wait error in batch {batch_number}: {fwe.seconds} seconds")
+        await context.bot.edit_message_text(
+            chat_id=progress_msg.chat_id,
+            message_id=progress_msg.message_id,
+            text=f"Flood wait error: Please wait {fwe.seconds} seconds before trying again."
+        )
+        return total_files, duplicate, errors, unsupported, current
+    except Exception as e:
+        logger.error(f"Error in batch {batch_number}: {str(e)}")
+        errors += 1
+
+    return total_files, duplicate, errors, unsupported, current
+
 async def handle_forwarded_message(update, context):
-    """Process forwarded message for channel indexing"""
+    """Process forwarded message for channel indexing (single or batch)"""
+    chat_id = update.message.chat_id
+
     if update.callback_query and update.callback_query.data == 'index_cancel':
         context.user_data['indexing'] = False
         context.user_data['index_channel_id'] = None
+        context.user_data['index_mode'] = None
         await update.callback_query.message.edit_text("Indexing cancelled.")
-        logger.info(f"User {update.callback_query.from_user.id} cancelled indexing")
+        logger.info(f"User {chat_id} cancelled indexing")
         return
 
     if not context.user_data.get('indexing'):
         return
 
-    message = update.message
-    chat_id = update.message.chat_id
+    # Check if user specified indexing mode
+    if not context.user_data.get('index_mode'):
+        if update.message.text.lower() in ['batch', 'single']:
+            context.user_data['index_mode'] = update.message.text.lower()
+            await update.message.reply_text(
+                f"{context.user_data['index_mode'].capitalize()} indexing selected. "
+                "Now forward a message from the channel to index."
+            )
+            logger.info(f"User {chat_id} selected {context.user_data['index_mode']} indexing")
+            return
+        else:
+            await update.message.reply_text(
+                "Please specify 'batch' or 'single' for indexing mode."
+            )
+            logger.warning(f"User {chat_id} provided invalid indexing mode")
+            return
 
-    # Check forward_origin instead of forward_from_chat (Fix for 'Message' object has no attribute 'forward_from_chat')
-    if not hasattr(message, 'forward_origin') or not message.forward_origin or message.forward_origin.type != 'channel':
+    # Check forward_origin for channel message
+    if not hasattr(update.message, 'forward_origin') or not update.message.forward_origin or update.message.forward_origin.type != 'channel':
         await update.message.reply_text("Please forward a message from a channel.")
         logger.warning(f"User {chat_id} forwarded a non-channel message")
         return
 
-    forwarded_channel_id = str(message.forward_origin.chat.id)
+    forwarded_channel_id = str(update.message.forward_origin.chat.id)
     logger.info(f"User {chat_id} forwarded message from channel {forwarded_channel_id}")
 
     if not forwarded_channel_id.startswith('-100'):
@@ -150,7 +298,15 @@ async def handle_forwarded_message(update, context):
         context.user_data['index_channel_id'] = forwarded_channel_id
         logger.info(f"User {chat_id} set indexing channel to {forwarded_channel_id}")
 
-        # Use telethon to fetch messages
+        # Initialize progress message
+        progress_msg = await update.message.reply_text(
+            f"Starting {context.user_data['index_mode']} indexing process...",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
+            )
+        )
+
+        # Set up Telethon client
         api_id = os.getenv("TELEGRAM_API_ID")
         api_hash = os.getenv("TELEGRAM_API_HASH")
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -166,14 +322,6 @@ async def handle_forwarded_message(update, context):
             logger.error(f"Indexing failed for channel {forwarded_channel_id}: {error_msg}")
             return
 
-        # Initialize progress message
-        progress_msg = await update.message.reply_text(
-            "Starting indexing process...",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton('Cancel', callback_data='index_cancel')]]
-            )
-        )
-
         try:
             client = TelegramClient(StringSession(), int(api_id), api_hash)
             await client.start(bot_token=bot_token)
@@ -184,123 +332,123 @@ async def handle_forwarded_message(update, context):
             errors = 0
             unsupported = 0
             current = 0
-            max_messages = 1000  # Limit to prevent timeouts
 
-            async for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
-                if not context.user_data.get('indexing'):
-                    break
+            if context.user_data['index_mode'] == 'batch':
+                # Batch indexing
+                total_files, duplicate, errors, unsupported, current = await batch_index(
+                    client, forwarded_channel_id, progress_msg, context
+                )
+            else:
+                # Single-pass indexing (original logic with minor improvements)
+                max_messages = 1000
+                async for msg in client.iter_messages(int(forwarded_channel_id), limit=max_messages):
+                    if not context.user_data.get('indexing'):
+                        break
 
-                current += 1
-                try:
-                    # Update progress every 20 messages
-                    if current % 20 == 0:
-                        await context.bot.edit_message_text(
-                            chat_id=progress_msg.chat_id,
-                            message_id=progress_msg.message_id,
-                            text=(
-                                f"Indexing in progress...\n"
-                                f"Messages processed: {current}\n"
-                                f"Movies indexed: {total_files}\n"
-                                f"Duplicates skipped: {duplicate}\n"
-                                f"Unsupported skipped: {unsupported}"
-                            )
-                        )
-
-                    # Skip non-documents or non-MKV files
-                    if not msg.document or msg.document.mime_type != 'video/x-matroska':
-                        unsupported += 1
-                        continue
-
-                    file_name = msg.document.attributes[-1].file_name
-                    message_id = msg.id
-
-                    # Detect language from filename
-                    language = None
-                    name_lower = file_name.lower()
-                    if 'tamil' in name_lower:
-                        language = 'tamil'
-                    elif 'english' in name_lower:
-                        language = 'english'
-                    elif 'hindi' in name_lower:
-                        language = 'hindi'
-
-                    # Get file ID by forwarding to bot
+                    current += 1
                     try:
-                        forwarded = await context.bot.forward_message(
-                            chat_id=context.bot.id,
-                            from_chat_id=forwarded_channel_id,
-                            message_id=message_id
-                        )
-                        if not forwarded.document:
+                        if current % 20 == 0:
+                            await context.bot.edit_message_text(
+                                chat_id=progress_msg.chat_id,
+                                message_id=progress_msg.message_id,
+                                text=(
+                                    f"Single-pass indexing in progress...\n"
+                                    f"Messages processed: {current}\n"
+                                    f"Movies indexed: {total_files}\n"
+                                    f"Duplicates skipped: {duplicate}\n"
+                                    f"Unsupported skipped: {unsupported}"
+                                )
+                            )
+
+                        if not msg.document or msg.document.mime_type != 'video/x-matroska':
                             unsupported += 1
                             continue
-                        
-                        file_id = forwarded.document.file_id
-                        await context.bot.delete_message(
-                            chat_id=context.bot.id,
-                            message_id=forwarded.message_id
-                        )
-                    except (TelegramError, BadRequest) as te:
-                        logger.error(f"Error getting file ID for {file_name}: {str(te)}")
+
+                        file_name = msg.document.attributes[-1].file_name
+                        message_id = msg.id
+
+                        language = None
+                        name_lower = file_name.lower()
+                        if 'tamil' in name_lower:
+                            language = 'tamil'
+                        elif 'english' in name_lower:
+                            language = 'english'
+                        elif 'hindi' in name_lower:
+                            language = 'hindi'
+
+                        try:
+                            forwarded = await context.bot.forward_message(
+                                chat_id=context.bot.id,
+                                from_chat_id=forwarded_channel_id,
+                                message_id=message_id
+                            )
+                            if not forwarded.document:
+                                unsupported += 1
+                                continue
+
+                            file_id = forwarded.document.file_id
+                            await context.bot.delete_message(
+                                chat_id=context.bot.id,
+                                message_id=forwarded.message_id
+                            )
+                        except (TelegramError, BadRequest) as te:
+                            logger.error(f"Error getting file ID for {file_name}: {str(te)}")
+                            errors += 1
+                            continue
+
+                        try:
+                            clean_name = file_name.replace('.mkv', '').split('_')
+                            title = clean_name[0].replace('.', ' ').strip()
+                            year = int(clean_name[1]) if len(clean_name) > 1 and clean_name[1].isdigit() else 0
+                            quality = clean_name[2] if len(clean_name) > 2 else 'Unknown'
+
+                            size_bytes = msg.document.size
+                            if size_bytes >= 1024 * 1024 * 1024:
+                                file_size = f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
+                            else:
+                                file_size = f"{size_bytes / (1024 * 1024):.2f}MB"
+
+                            movie_id = add_movie(
+                                title=title,
+                                year=year,
+                                quality=quality,
+                                file_size=file_size,
+                                file_id=file_id,
+                                message_id=message_id,
+                                language=language,
+                                channel_id=forwarded_channel_id
+                            )
+
+                            if movie_id:
+                                total_files += 1
+                                logger.info(f"Indexed: {title} ({year})")
+                            else:
+                                duplicate += 1
+                        except (IndexError, ValueError, AttributeError) as e:
+                            logger.warning(f"Error parsing {file_name}: {str(e)}")
+                            errors += 1
+
+                    except Exception as e:
+                        logger.error(f"Error processing message {message_id}: {str(e)}")
                         errors += 1
                         continue
-
-                    # Parse movie info
-                    try:
-                        clean_name = file_name.replace('.mkv', '').split('_')
-                        title = clean_name[0].replace('.', ' ').strip()
-                        year = int(clean_name[1]) if len(clean_name) > 1 and clean_name[1].isdigit() else 0
-                        quality = clean_name[2] if len(clean_name) > 2 else 'Unknown'
-                        
-                        # Format file size
-                        size_bytes = msg.document.size
-                        if size_bytes >= 1024 * 1024 * 1024:
-                            file_size = f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
-                        else:
-                            file_size = f"{size_bytes / (1024 * 1024):.2f}MB"
-
-                        # Add to database
-                        movie_id = add_movie(
-                            title=title,
-                            year=year,
-                            quality=quality,
-                            file_size=file_size,
-                            file_id=file_id,
-                            message_id=message_id,
-                            language=language,
-                            channel_id=forwarded_channel_id
-                        )
-                        
-                        if movie_id:
-                            total_files += 1
-                            logger.info(f"Indexed: {title} ({year})")
-                        else:
-                            duplicate += 1
-                    except (IndexError, ValueError, AttributeError) as e:
-                        logger.warning(f"Error parsing {file_name}: {str(e)}")
-                        errors += 1
-
-                except Exception as e:
-                    logger.error(f"Error processing message {message_id}: {str(e)}")
-                    errors += 1
-                    continue
 
             # Final report
             result_msg = (
-                f"✅ Indexing completed for channel {forwarded_channel_id}.\n"
+                f"✅ {context.user_data['index_mode'].capitalize()} indexing completed for channel {forwarded_channel_id}.\n"
                 f"• Total messages processed: {current}\n"
                 f"• Movies indexed: {total_files}\n"
                 f"• Duplicates skipped: {duplicate}\n"
                 f"• Unsupported files: {unsupported}\n"
                 f"• Errors occurred: {errors}"
             )
-            
+
             await context.bot.edit_message_text(
                 chat_id=progress_msg.chat_id,
                 message_id=progress_msg.message_id,
                 text=result_msg
             )
-            logger.info(f"Indexing completed for {forwarded_channel_id}")
+            logger.info(f"{context.user_data['index_mode'].capitalize()} indexing completed for {forwarded_channel_id}")
 
         except FloodWaitError as fwe:
             await update.message.reply_text(f"Flood wait error: Please wait {fwe.seconds} seconds before trying again.")
@@ -322,11 +470,14 @@ async def handle_forwarded_message(update, context):
                 await client.disconnect()
             context.user_data['indexing'] = False
             context.user_data['index_channel_id'] = None
+            context.user_data['index_mode'] = None
 
     except TelegramError as te:
         await update.message.reply_text(f"Error accessing channel: {str(te)}")
         logger.error(f"Channel access error: {str(te)}")
         context.user_data['indexing'] = False
+        context.user_data['index_channel_id'] = None
+        context.user_data['index_mode'] = None
 
 async def search_movie(update, context):
     """Handle text-based movie search in personal messages."""
