@@ -1,8 +1,14 @@
 import os
 import logging
+import asyncio
+import time
+import tempfile
 from PIL import Image
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest, NetworkError
 from database import get_user_settings
+from handlers import fix_thumb  # Import fix_thumb from handlers.py (adjust as needed)
+from hachoir.metadata import extractMetadata
+from hachoir.parser import createParser
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -12,67 +18,118 @@ DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
-def process_file(bot, chat_id, file_id, title, quality, message):
+async def process_file(bot, chat_id, file_id, title, quality, file_size, message, retries=3):
     """
-    Download a movie file, apply user settings (thumbnail, prefix, caption), and send it to the user.
+    Asynchronously download a movie file, apply user settings (thumbnail, prefix, caption), and send it to the user.
+    
+    Args:
+        bot: Telegram Bot instance
+        chat_id: User chat ID (int)
+        file_id: File ID of the movie (str)
+        title: Movie title (str)
+        quality: Movie quality (str)
+        file_size: File size (str, e.g., "1.2GB")
+        message: Telegram message object for replying
+        retries: Number of retry attempts for downloads (int)
+    
+    Returns:
+        bool: True if successful, False otherwise
     """
     settings = get_user_settings(chat_id)
     thumbnail_file_id = settings[0] if settings else None
     prefix = settings[1] if settings else ""
-    caption = settings[2] if settings else "Enjoy the movie!"
+    caption = settings[2] if settings else f"{title} ({quality})"
 
-    file_path = os.path.join(DOWNLOAD_DIR, f"{title}_{quality}.mkv")
-    thumb_path = os.path.join(DOWNLOAD_DIR, "thumb.jpg")
+    # Use tempfile for unique temporary files
+    with tempfile.NamedTemporaryFile(suffix=".mkv", dir=DOWNLOAD_DIR, delete=False) as movie_tmp, \
+         tempfile.NamedTemporaryFile(suffix=".jpg", dir=DOWNLOAD_DIR, delete=False) as thumb_tmp:
+        file_path = movie_tmp.name
+        thumb_path = thumb_tmp.name
 
-    try:
-        # Download movie file
-        logger.info(f"Downloading file {file_id} for user {chat_id}")
-        file = bot.get_file(file_id)
-        file.download(file_path)
-
-        # Prepare thumbnail
-        logger.info(f"Preparing thumbnail for user {chat_id}, thumbnail_file_id: {thumbnail_file_id}")
-        if thumbnail_file_id:
-            try:
-                thumb_file = bot.get_file(thumbnail_file_id)
-                thumb_file.download(thumb_path)
-                img = Image.open(thumb_path)
-                img.thumbnail((128, 128))
-                img.save(thumb_path)
-            except (TelegramError, IOError) as e:
-                logger.warning(f"Failed to process thumbnail for user {chat_id}: {str(e)}")
-                # Fallback to default thumbnail
-                Image.new('RGB', (128, 128), color='blue').save(thumb_path)
-        else:
-            Image.new('RGB', (128, 128), color='blue').save(thumb_path)
-
-        # Send file
-        filename = f"{prefix}{title}_{quality}.mkv"
-        logger.info(f"Sending file {filename} to user {chat_id}")
-        message.reply_document(
-            document=open(file_path, 'rb'),
-            filename=filename,
-            thumb=open(thumb_path, 'rb'),
-            caption=caption
-        )
-
-    except TelegramError as e:
-        logger.error(f"Telegram error processing file for user {chat_id}: {str(e)}")
-        message.reply_text("Sorry, there was an error downloading or sending the file. Please try again.")
-    except IOError as e:
-        logger.error(f"File I/O error for user {chat_id}: {str(e)}")
-        message.reply_text("Sorry, there was an error processing the file. Please try again.")
-    except Exception as e:
-        logger.error(f"Unexpected error for user {chat_id}: {str(e)}")
-        message.reply_text("An unexpected error occurred. Please try again later.")
-    finally:
-        # Clean up temporary files
         try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                logger.info(f"Deleted temporary file: {file_path}")
-            if os.path.exists(thumb_path):
-                os.remove(thumb_path)
-                logger.info(f"Deleted temporary thumbnail: {thumb_path}")
-        except OSError as e:
-            logger.warning(f"Error cleaning up files for user {chat_id}: {str(e)}")
+            # Download movie file with retries
+            logger.info(f"Downloading file {file_id} for user {chat_id}")
+            attempt = 0
+            while attempt < retries:
+                try:
+                    file = await bot.get_file(file_id)
+                    await file.download_to_drive(file_path)
+                    break
+                except (NetworkError, TelegramError) as e:
+                    attempt += 1
+                    if attempt == retries:
+                        logger.error(f"Failed to download file {file_id} for user {chat_id} after {retries} attempts: {str(e)}")
+                        await message.reply_text("Sorry, I couldn't download the file. Please try again later.")
+                        return False
+                    logger.warning(f"Download attempt {attempt} failed for user {chat_id}: {str(e)}. Retrying...")
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+            # Prepare thumbnail
+            logger.info(f"Preparing thumbnail for user {chat_id}, thumbnail_file_id: {thumbnail_file_id}")
+            processed_thumb = None
+            if thumbnail_file_id:
+                try:
+                    thumb_file = await bot.get_file(thumbnail_file_id)
+                    await thumb_file.download_to_drive(thumb_path)
+                    _, _, processed_thumb = await fix_thumb(thumb_path)
+                    if not processed_thumb:
+                        logger.warning(f"Thumbnail processing failed for user {chat_id}")
+                        processed_thumb = None
+                except (TelegramError, IOError) as e:
+                    logger.warning(f"Failed to process custom thumbnail for user {chat_id}: {str(e)}")
+                    processed_thumb = None
+
+            # Create default thumbnail if custom thumbnail fails or is not set
+            if not processed_thumb:
+                with Image.new('RGB', (320, 180), color='blue') as img:
+                    img.save(thumb_path, "JPEG", quality=95, optimize=True, progressive=False)
+                processed_thumb = thumb_path
+
+            # Prepare filename and caption
+            filename = f"{prefix}{title.replace(' ', '_')}_{quality}.mkv"
+            final_caption = f"[{file_size}] {caption} MKV"
+
+            # Send file
+            logger.info(f"Sending file {filename} to user {chat_id}")
+            try:
+                with open(file_path, 'rb') as movie_file, open(processed_thumb, 'rb') as thumb_file:
+                    await message.reply_document(
+                        document=movie_file,
+                        filename=filename,
+                        caption=final_caption,
+                        thumbnail=thumb_file,  # Use 'thumbnail' as per Telegram API
+                        parse_mode=None
+                    )
+                return True
+            except BadRequest as e:
+                logger.error(f"BadRequest sending file to user {chat_id}: {str(e)}")
+                await message.reply_text("Error: The file or thumbnail is invalid. Please try again.")
+                return False
+            except NetworkError as e:
+                logger.error(f"Network error sending file to user {chat_id}: {str(e)}")
+                await message.reply_text("Network error while sending the file. Please try again later.")
+                return False
+
+        except TelegramError as e:
+            logger.error(f"Telegram error processing file for user {chat_id}: {str(e)}")
+            await message.reply_text("Sorry, there was an error downloading or sending the file. Please try again.")
+            return False
+        except IOError as e:
+            logger.error(f"File I/O error for user {chat_id}: {str(e)}")
+            await message.reply_text("Sorry, there was an error processing the file. Please try again.")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error for user {chat_id}: {str(e)}")
+            await message.reply_text("An unexpected error occurred. Please try again later.")
+            return False
+        finally:
+            # Clean up temporary files
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.info(f"Deleted temporary file: {file_path}")
+                if os.path.exists(thumb_path):
+                    os.remove(thumb_path)
+                    logger.info(f"Deleted temporary thumbnail: {thumb_path}")
+            except OSError as e:
+                logger.warning(f"Error cleaning up files for user {chat_id}: {str(e)}")
